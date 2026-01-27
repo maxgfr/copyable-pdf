@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-#  PDF OCR Ultimate Script
+#  copyable-pdf
 #  Converts PDF to Images -> OCRs Images -> Merges back to Searchable PDF
 # ==============================================================================
 
@@ -52,14 +52,14 @@ log_error() {
 
 print_banner() {
     echo -e "${BLUE}"
-    echo "  ██████╗  ██████╗██████╗ "
-    echo " ██╔═══██╗██╔════╝██╔══██╗"
-    echo " ██║   ██║██║     ██████╔╝"
-    echo " ██║   ██║██║     ██╔══██╗"
-    echo " ╚██████╔╝╚██████╗██║  ██║"
-    echo "  ╚═════╝  ╚═════╝╚═╝  ╚═╝"
+    echo "  ██████╗ ██████╗ ██████╗ ██╗   ██╗"
+    echo " ██╔════╝██╔═══██╗██╔══██╗╚██╗ ██╔╝"
+    echo " ██║     ██║   ██║██████╔╝ ╚████╔╝ "
+    echo " ██║     ██║   ██║██╔═══╝   ╚██╔╝  "
+    echo " ╚██████╗╚██████╔╝██║        ██║   "
+    echo "  ╚═════╝ ╚═════╝ ╚═╝        ╚═╝   "
     echo -e "${NC}"
-    echo -e "   PDF OCR Ultimate v$VERSION"
+    echo -e "      copyable-pdf v$VERSION"
     echo ""
 }
 
@@ -293,22 +293,11 @@ require_command tesseract tesseract
 require_command pdftoppm poppler
 require_language "$LANG"
 
-# Check PDF merge tool
-MERGE_TOOL=""
-if command -v pdfunite >/dev/null 2>&1; then MERGE_TOOL="pdfunite"
-elif command -v qpdf >/dev/null 2>&1; then MERGE_TOOL="qpdf"
-elif command -v gs >/dev/null 2>&1; then MERGE_TOOL="gs"
-else
-    log_warn "Missing PDF merge tool."
-    manager=$(detect_pkg_manager)
-    if [ -n "$manager" ] && ask_yes_no "Install 'poppler' (includes pdfunite)?"; then
-        install_package "$manager" "poppler" || true
-    fi
-     if command -v pdfunite >/dev/null 2>&1; then MERGE_TOOL="pdfunite"; fi
-fi
-
-if [ -z "$MERGE_TOOL" ]; then
-    log_error "No PDF merge tool found (pdfunite, qpdf, or gs). Cannot continue."
+# Check PDF merge tool (pdfunite is part of poppler, which is already required)
+MERGE_TOOL="pdfunite"
+if ! command -v pdfunite >/dev/null 2>&1; then
+    log_error "Command 'pdfunite' not found, but it should be part of 'poppler'."
+    log_error "Please ensure 'poppler' is installed correctly."
     exit 1
 fi
 
@@ -367,22 +356,10 @@ log_info "Step 3/3: Merging PDF..."
 
 ORDERED_PDFS=""
 for i in $(seq 1 "$PAGE_COUNT"); do
-    # Handling pdftoppm numbering quirk:
-    # If < 10 files, it might be page-1 ... page-9
-    # Usually it's page-1.png.
-    # Tesseract output is page-1.pdf
-    
-    # Wait, pdftoppm adds leading zeros if many pages? 
-    # Actually, pdftoppm defaults to NO leading zeros: page-1.png, page-10.png.
-    # We rely on checking file existence.
-    
     p="$TEMP_DIR/page-$i.pdf"
     if [ -f "$p" ]; then
         ORDERED_PDFS="$ORDERED_PDFS $p"
     else
-        # Try checking for leading zeros if needed, but standard pdftoppm is usually simple integers
-        # If user has >999 pages or specific versions, filenames might vary.
-        # But for now, we assume standard behavior.
         log_warn "Page $i missing."
     fi
 done
@@ -392,17 +369,7 @@ if [ -z "$ORDERED_PDFS" ]; then
     exit 1
 fi
 
-case "$MERGE_TOOL" in
-    pdfunite)
-        pdfunite $ORDERED_PDFS "$OUTPUT_FILE"
-        ;;
-    qpdf)
-        qpdf --empty --pages $ORDERED_PDFS -- "$OUTPUT_FILE"
-        ;;
-    gs)
-        gs -dBATCH -dNOPAUSE -q -sDEVICE=pdfwrite -sOutputFile="$OUTPUT_FILE" $ORDERED_PDFS
-        ;;
-esac
+pdfunite $ORDERED_PDFS "$OUTPUT_FILE"
 
 echo ""
 log_success "Done! Output saved to:"

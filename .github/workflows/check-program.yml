@@ -1,0 +1,50 @@
+name: Check Program
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test-script:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng poppler-utils imagemagick ghostscript
+
+      - name: Create Dummy PDF
+        run: |
+          # Create a simple image with text
+          convert -size 800x600 xc:white -font DejaVu-Sans -pointsize 24 -fill black -draw "text 20,50 'Hello World This is a test PDF for OCR'" page1.png
+          convert -size 800x600 xc:white -font DejaVu-Sans -pointsize 24 -fill black -draw "text 20,50 'Second page with more text'" page2.png
+          
+          # Convert images to PDF
+          convert page1.png page2.png input.pdf
+          
+          echo "Created input.pdf"
+
+      - name: Run copyable-pdf
+        run: |
+          chmod +x script.sh
+          ./script.sh -v input.pdf
+
+      - name: Verify Output
+        run: |
+          if [ -f "input_ocr.pdf" ]; then
+            echo "✅ Output file created successfully"
+            ls -lh input_ocr.pdf
+          else
+            echo "❌ Output file missing"
+            exit 1
+          fi
+
+      - name: Check Content (Optional)
+        run: |
+          # Use pdftotext to check if OCR worked (install poppler-utils includes pdftotext)
+          pdftotext input_ocr.pdf - | grep "Hello World" && echo "✅ Text found" || echo "❌ Text not found"

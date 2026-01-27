@@ -16,7 +16,6 @@ VERBOSE=false
 COLOR_SUPPORT=true
 GEN_TEXT=false
 GEN_MD=false
-COPY_CLIP=false
 
 # --- Colors ---
 if [ -t 1 ] && [ "$COLOR_SUPPORT" = true ]; then
@@ -94,7 +93,6 @@ print_usage() {
     echo "  -j, --jobs <num>     Number of parallel jobs (default: auto)"
     echo "  -t, --text           Generate an additional .txt file"
     echo "  -m, --markdown       Generate an additional .md file"
-    echo "  -c, --clipboard      Copy recognized text to system clipboard (macOS)"
     echo "  -k, --keep           Keep temporary files (debug mode)"
     echo "  -v, --verbose        Verbose output"
     echo "  -h, --help           Show this help message"
@@ -240,10 +238,6 @@ while [[ $# -gt 0 ]]; do
             GEN_MD=true
             shift
             ;;
-        -c|--clipboard)
-            COPY_CLIP=true
-            shift
-            ;;
         -k|--keep)
             KEEP_TEMP=true
             shift
@@ -288,7 +282,6 @@ if [ -z "$INPUT_FILE" ]; then
     
     if ask_yes_no "Generate text file (.txt)?"; then GEN_TEXT=true; fi
     if ask_yes_no "Generate markdown file (.md)?"; then GEN_MD=true; fi
-    if ask_yes_no "Copy result to clipboard?"; then COPY_CLIP=true; fi
     
     # Optional Output
     local default_out
@@ -327,7 +320,6 @@ if [ "$VERBOSE" = true ]; then
     echo "  Jobs:      $JOBS"
     echo "  Text:      $GEN_TEXT"
     echo "  Markdown:  $GEN_MD"
-    echo "  Clipboard: $COPY_CLIP"
     echo ""
 fi
 
@@ -343,14 +335,6 @@ MERGE_TOOL="pdfunite"
 if ! command -v pdfunite >/dev/null 2>&1; then
     log_error "Command 'pdfunite' not found (should be part of 'poppler')."
     exit 1
-fi
-
-# Check pbcopy for clipboard on mac
-if [ "$COPY_CLIP" = true ]; then
-    if ! command -v pbcopy >/dev/null 2>&1; then
-        log_warn "pbcopy not found. Clipboard copy disabled (only available on macOS)."
-        COPY_CLIP=false
-    fi
 fi
 
 # 5. Execution
@@ -450,12 +434,6 @@ if [ "$GEN_MD" = true ]; then
     # -layout maintains physical layout which is closer to what we want in MD than raw stream
     pdftotext -layout "$OUTPUT_FILE" "$MD_FILE"
     log_success "Markdown saved to: $MD_FILE"
-fi
-
-if [ "$COPY_CLIP" = true ]; then
-    log_info "Copying text to clipboard..."
-    pdftotext "$OUTPUT_FILE" - | pbcopy
-    log_success "Text copied to clipboard!"
 fi
 
 echo ""

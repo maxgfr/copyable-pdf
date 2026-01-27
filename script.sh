@@ -14,6 +14,9 @@ DEFAULT_LANG="eng"
 KEEP_TEMP=false
 VERBOSE=false
 COLOR_SUPPORT=true
+GEN_TEXT=false
+GEN_MD=false
+COPY_CLIP=false
 
 # --- Colors ---
 if [ -t 1 ] && [ "$COLOR_SUPPORT" = true ]; then
@@ -50,6 +53,21 @@ log_error() {
     printf "${RED}[ERROR]${NC} %s\n" "$1" >&2
 }
 
+draw_progress_bar() {
+    local current="$1"
+    local total="$2"
+    local width=40
+    local percent=$((current * 100 / total))
+    local filled=$((current * width / total))
+    local empty=$((width - filled))
+    
+    # \r goes to start of line, clear line
+    printf "\r["
+    if [ $filled -gt 0 ]; then printf "%0.s#" $(seq 1 $filled); fi
+    if [ $empty -gt 0 ]; then printf "%0.s-" $(seq 1 $empty); fi
+    printf "] %d%% (%d/%d)" "$percent" "$current" "$total"
+}
+
 print_banner() {
     echo -e "${BLUE}"
     echo "  ██████╗ ██████╗ ██████╗ ██╗   ██╗ █████╗ ██████╗ ██╗     ███████╗      ██████╗ ██████╗ ███████╗"
@@ -67,27 +85,29 @@ print_usage() {
     echo "Usage: copyable-pdf [options] [input_file]"
     echo ""
     echo "Arguments:"
-    echo "  input_file           Path to the input PDF file (optional in interactive mode)"
+    echo "  input_file           Path to the input PDF file"
     echo ""
     echo "Options:"
-    echo "  -l, --lang <code>    Language code (default: eng)"
+    echo "  -l, --lang <code>    Language code(s) (e.g., 'eng', 'fra', 'eng+fra') (default: eng)"
     echo "  -o, --output <path>  Custom output file path"
     echo "  -d, --dpi <num>      DPI resolution for OCR (default: 300)"
     echo "  -j, --jobs <num>     Number of parallel jobs (default: auto)"
+    echo "  -t, --text           Generate an additional .txt file"
+    echo "  -m, --markdown       Generate an additional .md file"
+    echo "  -c, --clipboard      Copy recognized text to system clipboard (macOS)"
     echo "  -k, --keep           Keep temporary files (debug mode)"
     echo "  -v, --verbose        Verbose output"
     echo "  -h, --help           Show this help message"
     echo ""
     echo "Examples:"
-    echo "  ./script.sh document.pdf"
-    echo "  ./script.sh -l fra -d 600 document.pdf"
-    echo "  ./script.sh --jobs 8 -k document.pdf"
+    echo "  copyable-pdf document.pdf"
+    echo "  copyable-pdf -l fra+eng -t -c document.pdf"
+    echo "  copyable-pdf --jobs 8 -k document.pdf"
 }
 
 ask_yes_no() {
     local prompt="$1"
-    # Print prompt to stderr to avoid capturing it if used in subshells (though strictly we use read -p for interactive)
-    # Using printf >&2 to be safe
+    # Print prompt to stderr to avoid capturing it if used in subshells
     printf "\n%b%s [y/N]: %b" "$BOLD" "$prompt" "$NC" >&2
     read -r answer
     [[ "$answer" == "y" || "$answer" == "Y" ]]
@@ -157,30 +177,36 @@ require_command() {
 }
 
 require_language() {
-    local lang="$1"
-    if ! tesseract --list-langs 2>/dev/null | grep -qx "$lang"; then
-        log_warn "Missing Tesseract language data: $lang"
-        local manager=$(detect_pkg_manager)
-        if [ -n "$manager" ]; then
-             if ask_yes_no "Install language pack for '$lang'?"; then
-                case "$manager" in
-                    brew) install_package "$manager" "tesseract-lang" || true ;;
-                    apt) install_package "$manager" "tesseract-ocr-${lang}" || true ;;
-                    dnf|yum) install_package "$manager" "tesseract-langpack-${lang}" || true ;;
-                esac
-             fi
-        fi
-        
+    local langs_arg="$1"
+    # Split by '+'
+    local IFS='+'
+    read -ra LANGS <<< "$langs_arg"
+    
+    for lang in "${LANGS[@]}"; do
         if ! tesseract --list-langs 2>/dev/null | grep -qx "$lang"; then
-            log_error "Language '$lang' still not installed. Exiting."
-            exit 1
+            log_warn "Missing Tesseract language data for: $lang"
+            local manager=$(detect_pkg_manager)
+            if [ -n "$manager" ]; then
+                 if ask_yes_no "Install language pack for '$lang'?"; then
+                    case "$manager" in
+                        brew) install_package "$manager" "tesseract-lang" || true ;;
+                        apt) install_package "$manager" "tesseract-ocr-${lang}" || true ;;
+                        dnf|yum) install_package "$manager" "tesseract-langpack-${lang}" || true ;;
+                    esac
+                 fi
+            fi
+            
+            if ! tesseract --list-langs 2>/dev/null | grep -qx "$lang"; then
+                log_error "Language '$lang' still not installed. Exiting."
+                exit 1
+            fi
         fi
-    fi
+    done
 }
 
 # --- Main Logic ---
 
-# 1. Parse Arguments (Manual Parsing)
+# 1. Parse Arguments
 INPUT_FILE=""
 OUTPUT_FILE=""
 DPI="$DEFAULT_DPI"
@@ -205,6 +231,18 @@ while [[ $# -gt 0 ]]; do
         -j|--jobs)
             JOBS="$2"
             shift; shift
+            ;;
+        -t|--text)
+            GEN_TEXT=true
+            shift
+            ;;
+        -m|--markdown)
+            GEN_MD=true
+            shift
+            ;;
+        -c|--clipboard)
+            COPY_CLIP=true
+            shift
             ;;
         -k|--keep)
             KEEP_TEMP=true
@@ -245,8 +283,12 @@ if [ -z "$INPUT_FILE" ]; then
         fi
     done
     
-    LANG=$(prompt_input "Language code" "$DEFAULT_LANG")
+    LANG=$(prompt_input "Language code(s) (e.g. eng or fra+eng)" "$DEFAULT_LANG")
     DPI=$(prompt_input "DPI Resolution" "$DEFAULT_DPI")
+    
+    if ask_yes_no "Generate text file (.txt)?"; then GEN_TEXT=true; fi
+    if ask_yes_no "Generate markdown file (.md)?"; then GEN_MD=true; fi
+    if ask_yes_no "Copy result to clipboard?"; then COPY_CLIP=true; fi
     
     # Optional Output
     local default_out
@@ -278,12 +320,14 @@ fi
 if [ "$VERBOSE" = true ]; then
     echo ""
     echo "Configuration:"
-    echo "  Input:  $INPUT_FILE"
-    echo "  Output: $OUTPUT_FILE"
-    echo "  Lang:   $LANG"
-    echo "  DPI:    $DPI"
-    echo "  Jobs:   $JOBS"
-    echo "  Keep:   $KEEP_TEMP"
+    echo "  Input:     $INPUT_FILE"
+    echo "  Output:    $OUTPUT_FILE"
+    echo "  Lang:      $LANG"
+    echo "  DPI:       $DPI"
+    echo "  Jobs:      $JOBS"
+    echo "  Text:      $GEN_TEXT"
+    echo "  Markdown:  $GEN_MD"
+    echo "  Clipboard: $COPY_CLIP"
     echo ""
 fi
 
@@ -291,14 +335,22 @@ fi
 log_info "Checking dependencies..."
 require_command tesseract tesseract
 require_command pdftoppm poppler
+require_command pdftotext poppler
 require_language "$LANG"
 
-# Check PDF merge tool (pdfunite is part of poppler, which is already required)
+# Check PDF merge tool
 MERGE_TOOL="pdfunite"
 if ! command -v pdfunite >/dev/null 2>&1; then
-    log_error "Command 'pdfunite' not found, but it should be part of 'poppler'."
-    log_error "Please ensure 'poppler' is installed correctly."
+    log_error "Command 'pdfunite' not found (should be part of 'poppler')."
     exit 1
+fi
+
+# Check pbcopy for clipboard on mac
+if [ "$COPY_CLIP" = true ]; then
+    if ! command -v pbcopy >/dev/null 2>&1; then
+        log_warn "pbcopy not found. Clipboard copy disabled (only available on macOS)."
+        COPY_CLIP=false
+    fi
 fi
 
 # 5. Execution
@@ -313,7 +365,7 @@ fi
 log_info "Step 1/3: Converting PDF to images ($DPI DPI)..."
 pdftoppm "$INPUT_FILE" "$TEMP_DIR/page" -png -r "$DPI"
 
-# List all generated page images (pdftoppm uses zero-padded numbers: page-001.png, page-002.png...)
+# List all generated page images
 PAGE_IMAGES=("$TEMP_DIR"/page-*.png)
 if [ ! -f "${PAGE_IMAGES[0]}" ]; then
     log_error "No images generated."
@@ -322,7 +374,7 @@ fi
 PAGE_COUNT=${#PAGE_IMAGES[@]}
 log_success "Generated $PAGE_COUNT pages."
 
-log_info "Step 2/3: OCR Processing ($LANG) using $JOBS parallel jobs..."
+log_info "Step 2/3: OCR Processing ($LANG) with $JOBS jobs..."
 
 # Export vars for xargs
 export LANG_CODE="$LANG"
@@ -333,25 +385,36 @@ process_page_worker() {
     local base="${img%.*}" # remove extension
     
     if [ "$VERBOSE" = true ]; then
-        echo "  Processing $(basename "$img")..."
+        echo "Processing $(basename "$img")..." >&2
     fi
     
-    # tesseract input output -l lang pdf q
+    # tesseract input output -l lang pdf quiet
     tesseract "$img" "$base" -l "$LANG_CODE" pdf >/dev/null 2>&1
+    
+    # Signal completion similar to progress
+    echo "DONE"
 }
 export -f process_page_worker
 
-# Find all pngs and feed to xargs
-# Using -print0 for safety with filenames, though ours are simple page-N.png
-find "$TEMP_DIR" -name "page-*.png" -print0 | xargs -0 -P "$JOBS" -I {} bash -c 'process_page_worker "$@"' _ {}
+# Run parallel OCR and update progress bar
+counter=0
+# We pipe the output of xargs (which prints DONE lines) to our loop
+# Note: stdbuf -oL ensures output isn't buffered so progress updates smoothly
+find "$TEMP_DIR" -name "page-*.png" -print0 | \
+    xargs -0 -P "$JOBS" -I {} bash -c 'process_page_worker "$@"' _ {} | \
+    while read -r line; do
+        if [ "$line" == "DONE" ]; then
+            counter=$((counter + 1))
+            if [ "$VERBOSE" = false ]; then
+                draw_progress_bar "$counter" "$PAGE_COUNT"
+            fi
+        fi
+    done
 
+echo "" # Newline after progress bar
 log_success "OCR Complete."
 
-log_info "Step 3/3: Merging PDF..."
-
-# Gather PDF chunks in CORRECT order
-# pdftoppm naming uses zero-padding: page-001.png, page-002.png...
-# We iterate over the sorted PNG files and derive the corresponding PDF paths
+log_info "Step 3/3: Merging PDF & Finalizing..."
 
 ORDERED_PDFS=""
 for img in $(ls -1 "$TEMP_DIR"/page-*.png 2>/dev/null | sort -V); do
@@ -371,8 +434,31 @@ fi
 
 pdfunite $ORDERED_PDFS "$OUTPUT_FILE"
 
+log_success "Original PDF merged to: $OUTPUT_FILE"
+
+# Post-processing opts
+if [ "$GEN_TEXT" = true ]; then
+    TXT_FILE="${OUTPUT_FILE%.*}.txt"
+    log_info "Generating text file..."
+    pdftotext "$OUTPUT_FILE" "$TXT_FILE"
+    log_success "Text saved to: $TXT_FILE"
+fi
+
+if [ "$GEN_MD" = true ]; then
+    MD_FILE="${OUTPUT_FILE%.*}.md"
+    log_info "Generating markdown file..."
+    # -layout maintains physical layout which is closer to what we want in MD than raw stream
+    pdftotext -layout "$OUTPUT_FILE" "$MD_FILE"
+    log_success "Markdown saved to: $MD_FILE"
+fi
+
+if [ "$COPY_CLIP" = true ]; then
+    log_info "Copying text to clipboard..."
+    pdftotext "$OUTPUT_FILE" - | pbcopy
+    log_success "Text copied to clipboard!"
+fi
+
 echo ""
-log_success "Done! Output saved to:"
-echo -e "${BOLD}$OUTPUT_FILE${NC}"
+echo -e "${BOLD}Done!${NC}"
 echo ""
 

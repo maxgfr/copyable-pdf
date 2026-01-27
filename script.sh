@@ -52,19 +52,19 @@ log_error() {
 
 print_banner() {
     echo -e "${BLUE}"
-    echo "  ██████╗ ██████╗ ██████╗ ██╗   ██╗"
-    echo " ██╔════╝██╔═══██╗██╔══██╗╚██╗ ██╔╝"
-    echo " ██║     ██║   ██║██████╔╝ ╚████╔╝ "
-    echo " ██║     ██║   ██║██╔═══╝   ╚██╔╝  "
-    echo " ╚██████╗╚██████╔╝██║        ██║   "
-    echo "  ╚═════╝ ╚═════╝ ╚═╝        ╚═╝   "
+    echo "  ██████╗ ██████╗ ██████╗ ██╗   ██╗ █████╗ ██████╗ ██╗     ███████╗      ██████╗ ██████╗ ███████╗"
+    echo " ██╔════╝██╔═══██╗██╔══██╗╚██╗ ██╔╝██╔══██╗██╔══██╗██║     ██╔════╝      ██╔══██╗██╔══██╗██╔════╝"
+    echo " ██║     ██║   ██║██████╔╝ ╚████╔╝ ███████║██████╔╝██║     █████╗  █████╗██████╔╝██║  ██║█████╗  "
+    echo " ██║     ██║   ██║██╔═══╝   ╚██╔╝  ██╔══██║██╔══██╗██║     ██╔══╝  ╚════╝██╔═══╝ ██║  ██║██╔══╝  "
+    echo " ╚██████╗╚██████╔╝██║        ██║   ██║  ██║██████╔╝███████╗███████╗      ██║     ██████╔╝██║     "
+    echo "  ╚═════╝ ╚═════╝ ╚═╝        ╚═╝   ╚═╝  ╚═╝╚═════╝ ╚══════╝╚══════╝      ╚═╝     ╚═════╝ ╚═╝     "
     echo -e "${NC}"
-    echo -e "      copyable-pdf v$VERSION"
+    echo -e "                           Convert PDFs to searchable OCR documents v$VERSION"
     echo ""
 }
 
 print_usage() {
-    echo "Usage: ./script.sh [options] [input_file]"
+    echo "Usage: copyable-pdf [options] [input_file]"
     echo ""
     echo "Arguments:"
     echo "  input_file           Path to the input PDF file (optional in interactive mode)"

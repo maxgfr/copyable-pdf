@@ -310,20 +310,19 @@ else
     log_info "Temporary files will be kept at: $TEMP_DIR"
 fi
 
-log_info "Step 1/3: Converting PDF to images ($DPI DPI) using $JOBS parallel jobs..."
-# Note: pdftoppm itself isn't parallel per page easily without splitting PDF first.
-# We will just run it once. It's usually fast enough.
+log_info "Step 1/3: Converting PDF to images ($DPI DPI)..."
 pdftoppm "$INPUT_FILE" "$TEMP_DIR/page" -png -r "$DPI"
 
-# Count pages
-PAGE_COUNT=$(ls -1 "$TEMP_DIR"/page-*.png 2>/dev/null | wc -l | tr -d ' ')
-if [ "$PAGE_COUNT" -eq 0 ]; then
+# List all generated page images (pdftoppm uses zero-padded numbers: page-001.png, page-002.png...)
+PAGE_IMAGES=("$TEMP_DIR"/page-*.png)
+if [ ! -f "${PAGE_IMAGES[0]}" ]; then
     log_error "No images generated."
     exit 1
 fi
+PAGE_COUNT=${#PAGE_IMAGES[@]}
 log_success "Generated $PAGE_COUNT pages."
 
-log_info "Step 2/3: OCR Processing ($LANG)..."
+log_info "Step 2/3: OCR Processing ($LANG) using $JOBS parallel jobs..."
 
 # Export vars for xargs
 export LANG_CODE="$LANG"
@@ -351,16 +350,17 @@ log_success "OCR Complete."
 log_info "Step 3/3: Merging PDF..."
 
 # Gather PDF chunks in CORRECT order
-# pdftoppm specific naming: page-1.png, page-2.png ... page-10.png
-# We simply loop sequence 1..PAGE_COUNT to guarantee order.
+# pdftoppm naming uses zero-padding: page-001.png, page-002.png...
+# We iterate over the sorted PNG files and derive the corresponding PDF paths
 
 ORDERED_PDFS=""
-for i in $(seq 1 "$PAGE_COUNT"); do
-    p="$TEMP_DIR/page-$i.pdf"
+for img in $(ls -1 "$TEMP_DIR"/page-*.png 2>/dev/null | sort -V); do
+    base="${img%.*}"
+    p="${base}.pdf"
     if [ -f "$p" ]; then
         ORDERED_PDFS="$ORDERED_PDFS $p"
     else
-        log_warn "Page $i missing."
+        log_warn "PDF for $(basename "$img") missing."
     fi
 done
 

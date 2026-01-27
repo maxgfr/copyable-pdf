@@ -8,7 +8,7 @@
 set -e
 
 # --- Configuration & Defaults ---
-VERSION="1.0.1"
+VERSION="1.1.0"
 DEFAULT_DPI=300
 DEFAULT_LANG="eng"
 KEEP_TEMP=false

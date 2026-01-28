@@ -99,7 +99,7 @@ print_usage() {
     echo ""
     echo "Examples:"
     echo "  copyable-pdf document.pdf"
-    echo "  copyable-pdf -l fra+eng -t -c document.pdf"
+    echo "  copyable-pdf -l fra+eng -t document.pdf"
     echo "  copyable-pdf --jobs 8 -k document.pdf"
 }
 

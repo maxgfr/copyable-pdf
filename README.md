@@ -18,8 +18,7 @@
 ### Via Homebrew
 
 ```bash
-brew tap maxgfr/homebrew-tap
-brew install copyable-pdf
+brew install maxgfr/tap/copyable-pdf
 ```
 
 ### Manual Installation

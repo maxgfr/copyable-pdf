@@ -157,7 +157,8 @@ require_command() {
     
     if ! command -v "$cmd" >/dev/null 2>&1; then
         log_warn "Missing dependency: $cmd"
-        local manager=$(detect_pkg_manager)
+        local manager
+        manager=$(detect_pkg_manager)
         if [ -n "$manager" ]; then
             if ask_yes_no "Install '$pkg' using $manager?"; then
                 install_package "$manager" "$pkg" || true
@@ -183,7 +184,8 @@ require_language() {
     for lang in "${LANGS[@]}"; do
         if ! tesseract --list-langs 2>/dev/null | grep -qx "$lang"; then
             log_warn "Missing Tesseract language data for: $lang"
-            local manager=$(detect_pkg_manager)
+            local manager
+            manager=$(detect_pkg_manager)
             if [ -n "$manager" ]; then
                  if ask_yes_no "Install language pack for '$lang'?"; then
                     case "$manager" in
@@ -204,29 +206,53 @@ require_language() {
 
 # --- Main Logic ---
 
+# Fail with a usable message when an option that takes a value was given none.
+# Without this, `shift; shift` on a missing operand aborts under `set -e` and the
+# user gets a bare exit code and no output at all.
+#
+# Takes the option name and how many argv entries are LEFT (including the option
+# itself). Counting is the only reliable test: passing "$2" through would arrive
+# as an empty string whether the value was absent or genuinely empty, so the
+# callee could never tell the two apart.
+require_value() {
+    if [ "$2" -lt 2 ]; then
+        log_error "Option '$1' requires a value."
+        print_usage
+        exit 2
+    fi
+}
+
 # 1. Parse Arguments
 INPUT_FILE=""
 OUTPUT_FILE=""
 DPI="$DEFAULT_DPI"
-LANG="$DEFAULT_LANG"
+# NOT `LANG`: that is the POSIX locale variable, and it is already exported in
+# almost every shell, so assigning a tesseract code to it ships an invalid locale
+# ("fra+eng") to every child process — pdftoppm, pdftotext, sort, tesseract
+# itself. Keep the OCR language in a name of our own.
+OCR_LANG="$DEFAULT_LANG"
 JOBS=""
 
 while [[ $# -gt 0 ]]; do
     key="$1"
     case $key in
         -l|--lang)
-            LANG="$2"
+            require_value "$key" "$#"
+            OCR_LANG="$2"
             shift; shift
             ;;
         -o|--output)
+            require_value "$key" "$#"
             OUTPUT_FILE="$2"
             shift; shift
             ;;
         -d|--dpi)
+            require_value "$key" "$#"
             DPI="$2"
             shift; shift
             ;;
         -j|--jobs)
+            require_value "$key" "$#"
             JOBS="$2"
             shift; shift
             ;;
@@ -277,14 +303,16 @@ if [ -z "$INPUT_FILE" ]; then
         fi
     done
     
-    LANG=$(prompt_input "Language code(s) (e.g. eng or fra+eng)" "$DEFAULT_LANG")
+    OCR_LANG=$(prompt_input "Language code(s) (e.g. eng or fra+eng)" "$DEFAULT_LANG")
     DPI=$(prompt_input "DPI Resolution" "$DEFAULT_DPI")
-    
+
     if ask_yes_no "Generate text file (.txt)?"; then GEN_TEXT=true; fi
     if ask_yes_no "Generate markdown file (.md)?"; then GEN_MD=true; fi
-    
-    # Optional Output
-    local default_out
+
+    # Optional Output. NOT `local` — this block runs at script scope, not inside
+    # a function, where bash rejects `local` outright ("can only be used in a
+    # function"). Under `set -e` that aborted the whole run, which is why
+    # interactive mode never reached a conversion.
     default_out="$(basename "$INPUT_FILE" .pdf)_ocr.pdf"
     OUTPUT_FILE=$(prompt_input "Output file" "$default_out")
 fi
@@ -297,6 +325,31 @@ fi
 
 if [ -z "$OUTPUT_FILE" ]; then
     OUTPUT_FILE="$(basename "$INPUT_FILE" .pdf)_ocr.pdf"
+fi
+
+# Everything below is checked BEFORE any OCR runs. Each of these used to surface
+# only at the very end — after minutes of rasterising and recognising every page
+# — as a raw poppler "I/O Error" or a pdftoppm usage dump.
+OUT_DIR="$(dirname "$OUTPUT_FILE")"
+if [ ! -d "$OUT_DIR" ]; then
+    log_error "Output directory does not exist: $OUT_DIR"
+    exit 2
+fi
+if [ ! -w "$OUT_DIR" ]; then
+    log_error "Output directory is not writable: $OUT_DIR"
+    exit 2
+fi
+
+case "$DPI" in
+    ''|*[!0-9]*) log_error "DPI must be a positive integer (got '$DPI')."; exit 2 ;;
+    0) log_error "DPI must be greater than 0."; exit 2 ;;
+esac
+
+if [ -n "$JOBS" ]; then
+    case "$JOBS" in
+        ''|*[!0-9]*) log_error "Jobs must be a positive integer (got '$JOBS')."; exit 2 ;;
+        0) log_error "Jobs must be greater than 0."; exit 2 ;;
+    esac
 fi
 
 # Auto-detect cores if not set
@@ -315,7 +368,7 @@ if [ "$VERBOSE" = true ]; then
     echo "Configuration:"
     echo "  Input:     $INPUT_FILE"
     echo "  Output:    $OUTPUT_FILE"
-    echo "  Lang:      $LANG"
+    echo "  Lang:      $OCR_LANG"
     echo "  DPI:       $DPI"
     echo "  Jobs:      $JOBS"
     echo "  Text:      $GEN_TEXT"
@@ -328,10 +381,9 @@ log_info "Checking dependencies..."
 require_command tesseract tesseract
 require_command pdftoppm poppler
 require_command pdftotext poppler
-require_language "$LANG"
+require_language "$OCR_LANG"
 
 # Check PDF merge tool
-MERGE_TOOL="pdfunite"
 if ! command -v pdfunite >/dev/null 2>&1; then
     log_error "Command 'pdfunite' not found (should be part of 'poppler')."
     exit 1
@@ -358,10 +410,10 @@ fi
 PAGE_COUNT=${#PAGE_IMAGES[@]}
 log_success "Generated $PAGE_COUNT pages."
 
-log_info "Step 2/3: OCR Processing ($LANG) with $JOBS jobs..."
+log_info "Step 2/3: OCR Processing ($OCR_LANG) with $JOBS jobs..."
 
 # Export vars for xargs
-export LANG_CODE="$LANG"
+export LANG_CODE="$OCR_LANG"
 export VERBOSE
 
 process_page_worker() {
@@ -401,12 +453,15 @@ log_success "OCR Complete."
 log_info "Step 3/3: Merging PDF & Finalizing..."
 
 # Handle merging in chunks to avoid "Too many open files" error
-PAGE_LIST=()
-# We use a pattern that matches the files generated by Tesseract
-# Note: sort -V is used for natural sorting (page-1, page-2, ..., page-10)
-for p in $(ls -1 "$TEMP_DIR"/page-*.pdf 2>/dev/null | sort -V); do
-    PAGE_LIST+=("$p")
-done
+# Glob rather than parse `ls`: the old `for p in $(ls -1 ...)` word-split on
+# spaces, so a TMPDIR containing one (mktemp honours TMPDIR on Linux) turned
+# every page path into two non-existent ones and the merge failed.
+#
+# No `sort -V` needed: pdftoppm zero-pads each page number to the width of the
+# LAST page, so within one run the glob is already in page order.
+shopt -s nullglob
+PAGE_LIST=("$TEMP_DIR"/page-*.pdf)
+shopt -u nullglob
 
 PAGE_COUNT_PDF=${#PAGE_LIST[@]}
 
@@ -441,15 +496,21 @@ fi
 log_success "Original PDF merged to: $OUTPUT_FILE"
 
 # Post-processing opts
+# The sidecar stem, derived from the basename ONLY. `${OUTPUT_FILE%.*}` strips at
+# the last dot anywhere in the path, so `-o out/v1.2/report` used to drop
+# `out/v1.txt` beside the directory instead of inside it — silently, exit 0.
+OUT_BASE="$(basename "$OUTPUT_FILE")"
+OUT_STEM="$OUT_DIR/${OUT_BASE%.*}"
+
 if [ "$GEN_TEXT" = true ]; then
-    TXT_FILE="${OUTPUT_FILE%.*}.txt"
+    TXT_FILE="$OUT_STEM.txt"
     log_info "Generating text file..."
     pdftotext "$OUTPUT_FILE" "$TXT_FILE"
     log_success "Text saved to: $TXT_FILE"
 fi
 
 if [ "$GEN_MD" = true ]; then
-    MD_FILE="${OUTPUT_FILE%.*}.md"
+    MD_FILE="$OUT_STEM.md"
     log_info "Generating markdown file..."
     # -layout maintains physical layout which is closer to what we want in MD than raw stream
     pdftotext -layout "$OUTPUT_FILE" "$MD_FILE"

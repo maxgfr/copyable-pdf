@@ -16,17 +16,20 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng poppler-utils imagemagick ghostscript
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng poppler-utils imagemagick ghostscript shellcheck
+
+      - name: Lint
+        run: shellcheck -S warning script.sh
 
       - name: Create Dummy PDF
         run: |
           # Create a simple image with text
           convert -size 800x600 xc:white -font DejaVu-Sans -pointsize 24 -fill black -draw "text 20,50 'Hello World This is a test PDF for OCR'" page1.png
           convert -size 800x600 xc:white -font DejaVu-Sans -pointsize 24 -fill black -draw "text 20,50 'Second page with more text'" page2.png
-          
+
           # Convert images to PDF
           convert page1.png page2.png input.pdf
-          
+
           echo "Created input.pdf"
 
       - name: Run copyable-pdf
@@ -44,7 +47,65 @@ jobs:
             exit 1
           fi
 
-      - name: Check Content (Optional)
+      # This used to be `grep … && echo ✅ || echo ❌`, which reports a failure
+      # and then exits 0 — the check could never fail. It is the only step that
+      # proves OCR actually recognised anything, so it has to be able to.
+      - name: Check OCR content
         run: |
-          # Use pdftotext to check if OCR worked (install poppler-utils includes pdftotext)
-          pdftotext input_ocr.pdf - | grep "Hello World" && echo "✅ Text found" || echo "❌ Text not found"
+          pdftotext input_ocr.pdf - | grep -q "Hello World"
+          echo "✅ OCR text found"
+
+      - name: Every page survives the merge
+        run: |
+          pages=$(pdfinfo input_ocr.pdf | awk '/^Pages/{print $2}')
+          [ "$pages" = "2" ] || { echo "❌ expected 2 pages, got $pages"; exit 1; }
+          echo "✅ 2 pages"
+
+      # --- Regressions. Each of these shipped broken in 1.2.2. ---
+
+      - name: Interactive mode reaches a conversion
+        run: |
+          # `local` outside a function aborted the run under `set -e`, so running
+          # with no arguments never produced anything at all.
+          printf 'input.pdf\n\n\nn\nn\n\n' | ./script.sh
+          test -f input_ocr.pdf
+
+      - name: Sidecars land beside the output, not beside its directory
+        run: |
+          # `${OUTPUT_FILE%.*}` strips at the last dot ANYWHERE in the path, so a
+          # dotted directory sent the .md one level up, silently and with exit 0.
+          mkdir -p "out/v1.2"
+          ./script.sh -o "out/v1.2/report.pdf" -m -t input.pdf
+          test -f "out/v1.2/report.md" || { echo "❌ .md missing from out/v1.2"; exit 1; }
+          test -f "out/v1.2/report.txt" || { echo "❌ .txt missing from out/v1.2"; exit 1; }
+          test ! -e "out/v1.md" || { echo "❌ .md escaped to out/v1.md"; exit 1; }
+          echo "✅ sidecars stayed put"
+
+      - name: A temp directory containing a space still merges
+        run: |
+          # The merge parsed `ls` output, so word-splitting turned each page path
+          # into two non-existent ones. mktemp honours TMPDIR on Linux.
+          mkdir -p "/tmp/with space"
+          TMPDIR="/tmp/with space" ./script.sh -o spaced.pdf input.pdf
+          pages=$(pdfinfo spaced.pdf | awk '/^Pages/{print $2}')
+          [ "$pages" = "2" ] || { echo "❌ expected 2 pages, got $pages"; exit 1; }
+          echo "✅ 2 pages with a spaced TMPDIR"
+
+      - name: The POSIX locale is left alone
+        run: |
+          # The OCR language used to be stored in $LANG, which is the locale
+          # variable and already exported — so "fra+eng" reached every child.
+          grep -q 'OCR_LANG=' script.sh
+          ! grep -qE '^\s*LANG="?\$(DEFAULT_LANG|2)' script.sh
+          echo "✅ \$LANG is not hijacked"
+
+      - name: Bad input fails fast, before any OCR
+        run: |
+          set +e
+          ./script.sh -l;                              [ $? -eq 2 ] || { echo "❌ missing -l value"; exit 1; }
+          ./script.sh -d abc -o x.pdf input.pdf;       [ $? -eq 2 ] || { echo "❌ bad dpi"; exit 1; }
+          ./script.sh -j 0 -o x.pdf input.pdf;         [ $? -eq 2 ] || { echo "❌ bad jobs"; exit 1; }
+          ./script.sh -o nope/x.pdf input.pdf;         [ $? -eq 2 ] || { echo "❌ missing out dir"; exit 1; }
+          set -e
+          test ! -e x.pdf
+          echo "✅ all rejected with exit 2, nothing written"

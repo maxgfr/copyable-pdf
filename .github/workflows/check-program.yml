@@ -36,29 +36,36 @@ jobs:
       - name: Lint
         run: shellcheck -S warning script.sh
 
-      - name: Pick a font the fixtures can be drawn with
+      - name: Find a font file the fixtures can be drawn with
         run: |
-          # Font names differ between a Debian ImageMagick and a Homebrew one,
-          # and a missing -font is a hard error. Take the first plain sans face
-          # this machine actually reports, whatever it is called here.
-          available=$($CONVERT -list font | awk '/^ *Font: /{print $2}')
-          for candidate in DejaVu-Sans Helvetica Arial LiberationSans-Regular; do
-            if printf '%s\n' "$available" | grep -qx "$candidate"; then
-              echo "FIXTURE_FONT=$candidate" >> "$GITHUB_ENV"
-              echo "using $candidate"
+          # Not a font *name*: Homebrew's ImageMagick enumerates none at all
+          # (`magick -list font` is empty), so only a path to a face on disk
+          # works on both runners. A missing -font is a hard error, and the
+          # fixture text has to be legible enough for OCR, so a symbol face
+          # picked at random will not do.
+          for f in \
+            /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf \
+            /usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf \
+            /System/Library/Fonts/Supplemental/Arial.ttf \
+            /System/Library/Fonts/Supplemental/Verdana.ttf; do
+            if [ -f "$f" ]; then
+              echo "FIXTURE_FONT=$f" >> "$GITHUB_ENV"
+              echo "using $f"
               exit 0
             fi
           done
-          first=$(printf '%s\n' "$available" | head -n 1)
-          [ -n "$first" ] || { echo "❌ ImageMagick lists no fonts at all"; exit 1; }
-          echo "FIXTURE_FONT=$first" >> "$GITHUB_ENV"
-          echo "falling back to $first"
+          found=$(find /usr/share/fonts /System/Library/Fonts /Library/Fonts -type f \
+                    \( -iname '*dejavusans*.ttf' -o -iname '*arial*.ttf' -o -iname '*liberationsans*.ttf' \) \
+                    2>/dev/null | head -n 1)
+          [ -n "$found" ] || { echo "❌ no usable sans font on this runner"; exit 1; }
+          echo "FIXTURE_FONT=$found" >> "$GITHUB_ENV"
+          echo "falling back to $found"
 
       - name: Create Dummy PDF
         run: |
           # Create a simple image with text
-          $CONVERT -size 800x600 xc:white -font $FIXTURE_FONT -pointsize 24 -fill black -draw "text 20,50 'Hello World This is a test PDF for OCR'" page1.png
-          $CONVERT -size 800x600 xc:white -font $FIXTURE_FONT -pointsize 24 -fill black -draw "text 20,50 'Second page with more text'" page2.png
+          $CONVERT -size 800x600 xc:white -font "$FIXTURE_FONT" -pointsize 24 -fill black -draw "text 20,50 'Hello World This is a test PDF for OCR'" page1.png
+          $CONVERT -size 800x600 xc:white -font "$FIXTURE_FONT" -pointsize 24 -fill black -draw "text 20,50 'Second page with more text'" page2.png
 
           # Convert images to PDF
           $CONVERT page1.png page2.png input.pdf

@@ -530,6 +530,9 @@ process_page_worker() {
     fi
 
     if ! tesseract "$img" "$base" -l "$LANG_CODE" "${tess_opts[@]}" pdf >/dev/null 2>"$base.err"; then
+        # Drop anything half-written, so a truncated page cannot be counted as
+        # a successful one and merged into the output.
+        rm -f "$base.pdf"
         echo "FAIL $name"
         return 1
     fi

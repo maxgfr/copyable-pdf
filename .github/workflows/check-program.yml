@@ -122,11 +122,30 @@ jobs:
 
       - name: Bad input fails fast, before any OCR
         run: |
+          mkdir -p outdir
+          printf 'this is not a pdf\n' > notpdf.pdf
+          cp input.pdf self.pdf
           set +e
           ./script.sh -l;                              [ $? -eq 2 ] || { echo "❌ missing -l value"; exit 1; }
           ./script.sh -d abc -o x.pdf input.pdf;       [ $? -eq 2 ] || { echo "❌ bad dpi"; exit 1; }
           ./script.sh -j 0 -o x.pdf input.pdf;         [ $? -eq 2 ] || { echo "❌ bad jobs"; exit 1; }
           ./script.sh -o nope/x.pdf input.pdf;         [ $? -eq 2 ] || { echo "❌ missing out dir"; exit 1; }
+          ./script.sh -o outdir/ input.pdf;            [ $? -eq 2 ] || { echo "❌ output is a directory"; exit 1; }
+          ./script.sh -o outdir input.pdf;             [ $? -eq 2 ] || { echo "❌ output is a directory"; exit 1; }
+          ./script.sh -o self.pdf self.pdf;            [ $? -eq 2 ] || { echo "❌ output overwrites input"; exit 1; }
+          ./script.sh -o x.pdf notpdf.pdf;             [ $? -eq 2 ] || { echo "❌ input is not a PDF"; exit 1; }
           set -e
           test ! -e x.pdf
+          # The source must still be the source, not a rasterised copy of itself.
+          cmp -s self.pdf input.pdf || { echo "❌ the input was overwritten"; exit 1; }
           echo "✅ all rejected with exit 2, nothing written"
+
+      - name: --version prints the version
+        run: |
+          declared=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' script.sh)
+          [ -n "$declared" ] || { echo "❌ no VERSION= in script.sh"; exit 1; }
+          for flag in -V --version; do
+            out=$(./script.sh $flag)
+            [ "$out" = "copyable-pdf $declared" ] || { echo "❌ $flag printed '$out'"; exit 1; }
+          done
+          echo "✅ version reported as $declared"

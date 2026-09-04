@@ -96,6 +96,7 @@ print_usage() {
     echo "  -k, --keep           Keep temporary files (debug mode)"
     echo "  -v, --verbose        Verbose output"
     echo "  -h, --help           Show this help message"
+    echo "  -V, --version        Print the version and exit"
     echo ""
     echo "Examples:"
     echo "  copyable-pdf document.pdf"
@@ -277,6 +278,10 @@ while [[ $# -gt 0 ]]; do
             print_usage
             exit 0
             ;;
+        -V|--version)
+            echo "copyable-pdf $VERSION"
+            exit 0
+            ;;
         *)
             if [ -z "$INPUT_FILE" ]; then
                 INPUT_FILE="$1"
@@ -330,6 +335,25 @@ fi
 # Everything below is checked BEFORE any OCR runs. Each of these used to surface
 # only at the very end — after minutes of rasterising and recognising every page
 # — as a raw poppler "I/O Error" or a pdftoppm usage dump.
+# A directory as the output path used to sail through validation — `dirname
+# outdir/` is `.`, which exists and is writable — and only surfaced after the
+# whole document had been OCR'd, as poppler's `I/O Error: Could not open file`.
+case "$OUTPUT_FILE" in
+    */) log_error "Output path is a directory: $OUTPUT_FILE"; exit 2 ;;
+esac
+if [ -d "$OUTPUT_FILE" ]; then
+    log_error "Output path is a directory: $OUTPUT_FILE"
+    exit 2
+fi
+
+# Writing the OCR result over its own source destroys the original: the input
+# has already been rasterised into the temp directory by then, so there is
+# nothing left to recover from.
+if [ -e "$OUTPUT_FILE" ] && [ "$INPUT_FILE" -ef "$OUTPUT_FILE" ]; then
+    log_error "Output would overwrite the input: $OUTPUT_FILE"
+    exit 2
+fi
+
 OUT_DIR="$(dirname "$OUTPUT_FILE")"
 if [ ! -d "$OUT_DIR" ]; then
     log_error "Output directory does not exist: $OUT_DIR"
@@ -388,6 +412,24 @@ if ! command -v pdfunite >/dev/null 2>&1; then
     log_error "Command 'pdfunite' not found (should be part of 'poppler')."
     exit 1
 fi
+require_command pdfinfo poppler
+
+# Only now can the input be checked: pdfinfo ships with poppler, so this has to
+# come after the dependency checks. A corrupt or password-protected PDF used to
+# get as far as pdftoppm and come back as a raw poppler error with a temp
+# directory already created.
+if ! PDF_INFO="$(pdfinfo "$INPUT_FILE" 2>&1)"; then
+    log_error "'$INPUT_FILE' is not a readable PDF (corrupt or encrypted)."
+    log_error "  $(echo "$PDF_INFO" | tail -n 1)"
+    exit 2
+fi
+PDF_PAGES="$(echo "$PDF_INFO" | awk '/^Pages:/{print $2; exit}')"
+case "$PDF_PAGES" in
+    ''|*[!0-9]*) PDF_PAGES="" ;;
+esac
+if [ -n "$PDF_PAGES" ]; then
+    log_info "Input has $PDF_PAGES page(s)."
+fi
 
 # 5. Execution
 
@@ -408,6 +450,10 @@ if [ ! -f "${PAGE_IMAGES[0]}" ]; then
     exit 1
 fi
 PAGE_COUNT=${#PAGE_IMAGES[@]}
+if [ -n "$PDF_PAGES" ] && [ "$PAGE_COUNT" -ne "$PDF_PAGES" ]; then
+    log_error "Rasterised $PAGE_COUNT page(s) but the PDF has $PDF_PAGES; refusing to continue."
+    exit 1
+fi
 log_success "Generated $PAGE_COUNT pages."
 
 log_info "Step 2/3: OCR Processing ($OCR_LANG) with $JOBS jobs..."

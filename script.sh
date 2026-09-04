@@ -5,7 +5,7 @@
 #  Converts PDF to Images -> OCRs Images -> Merges back to Searchable PDF
 # ==============================================================================
 
-set -e
+set -eo pipefail
 
 # --- Configuration & Defaults ---
 VERSION="1.2.3"
@@ -16,6 +16,7 @@ VERBOSE=false
 COLOR_SUPPORT=true
 GEN_TEXT=false
 GEN_MD=false
+PRESERVE=false
 
 # --- Colors ---
 if [ -t 1 ] && [ "$COLOR_SUPPORT" = true ]; then
@@ -67,6 +68,20 @@ draw_progress_bar() {
     printf "] %d%% (%d/%d)" "$percent" "$current" "$total"
 }
 
+# A redrawn bar is meaningless once stdout is a file: piping a run to a log or
+# to CI used to bury the output under hundreds of \r-joined bar frames on one
+# unreadable line. Off a terminal, report a plain line now and then instead.
+report_progress() {
+    local current="$1"
+    local total="$2"
+
+    if [ -t 1 ]; then
+        draw_progress_bar "$current" "$total"
+    elif [ $((current % 10)) -eq 0 ] || [ "$current" -eq "$total" ]; then
+        log_info "page $current/$total"
+    fi
+}
+
 print_banner() {
     echo -e "${BLUE}"
     echo "  ██████╗ ██████╗ ██████╗ ██╗   ██╗ █████╗ ██████╗ ██╗     ███████╗      ██████╗ ██████╗ ███████╗"
@@ -92,15 +107,20 @@ print_usage() {
     echo "  -d, --dpi <num>      DPI resolution for OCR (default: 300)"
     echo "  -j, --jobs <num>     Number of parallel jobs (default: auto)"
     echo "  -t, --text           Generate an additional .txt file"
-    echo "  -m, --markdown       Generate an additional .md file"
+    echo "  -m, --markdown       Generate an additional .md file (layout-preserved plain text)"
+    echo "  -p, --preserve       Keep the original pages and add an invisible text"
+    echo "                       layer on top (needs qpdf) instead of rebuilding"
+    echo "                       the PDF from rasterised images"
     echo "  -k, --keep           Keep temporary files (debug mode)"
     echo "  -v, --verbose        Verbose output"
     echo "  -h, --help           Show this help message"
+    echo "  -V, --version        Print the version and exit"
     echo ""
     echo "Examples:"
     echo "  copyable-pdf document.pdf"
     echo "  copyable-pdf -l fra+eng -t document.pdf"
     echo "  copyable-pdf --jobs 8 -k document.pdf"
+    echo "  copyable-pdf --preserve scan.pdf"
 }
 
 ask_yes_no() {
@@ -264,6 +284,10 @@ while [[ $# -gt 0 ]]; do
             GEN_MD=true
             shift
             ;;
+        -p|--preserve)
+            PRESERVE=true
+            shift
+            ;;
         -k|--keep)
             KEEP_TEMP=true
             shift
@@ -275,6 +299,10 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             print_banner
             print_usage
+            exit 0
+            ;;
+        -V|--version)
+            echo "copyable-pdf $VERSION"
             exit 0
             ;;
         *)
@@ -307,7 +335,7 @@ if [ -z "$INPUT_FILE" ]; then
     DPI=$(prompt_input "DPI Resolution" "$DEFAULT_DPI")
 
     if ask_yes_no "Generate text file (.txt)?"; then GEN_TEXT=true; fi
-    if ask_yes_no "Generate markdown file (.md)?"; then GEN_MD=true; fi
+    if ask_yes_no "Generate .md file (layout-preserved plain text)?"; then GEN_MD=true; fi
 
     # Optional Output. NOT `local` — this block runs at script scope, not inside
     # a function, where bash rejects `local` outright ("can only be used in a
@@ -330,6 +358,25 @@ fi
 # Everything below is checked BEFORE any OCR runs. Each of these used to surface
 # only at the very end — after minutes of rasterising and recognising every page
 # — as a raw poppler "I/O Error" or a pdftoppm usage dump.
+# A directory as the output path used to sail through validation — `dirname
+# outdir/` is `.`, which exists and is writable — and only surfaced after the
+# whole document had been OCR'd, as poppler's `I/O Error: Could not open file`.
+case "$OUTPUT_FILE" in
+    */) log_error "Output path is a directory: $OUTPUT_FILE"; exit 2 ;;
+esac
+if [ -d "$OUTPUT_FILE" ]; then
+    log_error "Output path is a directory: $OUTPUT_FILE"
+    exit 2
+fi
+
+# Writing the OCR result over its own source destroys the original: the input
+# has already been rasterised into the temp directory by then, so there is
+# nothing left to recover from.
+if [ -e "$OUTPUT_FILE" ] && [ "$INPUT_FILE" -ef "$OUTPUT_FILE" ]; then
+    log_error "Output would overwrite the input: $OUTPUT_FILE"
+    exit 2
+fi
+
 OUT_DIR="$(dirname "$OUTPUT_FILE")"
 if [ ! -d "$OUT_DIR" ]; then
     log_error "Output directory does not exist: $OUT_DIR"
@@ -373,6 +420,7 @@ if [ "$VERBOSE" = true ]; then
     echo "  Jobs:      $JOBS"
     echo "  Text:      $GEN_TEXT"
     echo "  Markdown:  $GEN_MD"
+    echo "  Preserve:  $PRESERVE"
     echo ""
 fi
 
@@ -387,6 +435,44 @@ require_language "$OCR_LANG"
 if ! command -v pdfunite >/dev/null 2>&1; then
     log_error "Command 'pdfunite' not found (should be part of 'poppler')."
     exit 1
+fi
+require_command pdfinfo poppler
+# Only --preserve needs qpdf, so the default path keeps its dependency list to
+# tesseract and poppler.
+if [ "$PRESERVE" = true ]; then
+    require_command qpdf qpdf
+fi
+
+# Only now can the input be checked: pdfinfo ships with poppler, so this has to
+# come after the dependency checks. A corrupt or password-protected PDF used to
+# get as far as pdftoppm and come back as a raw poppler error with a temp
+# directory already created.
+if ! PDF_INFO="$(pdfinfo "$INPUT_FILE" 2>&1)"; then
+    log_error "'$INPUT_FILE' is not a readable PDF (corrupt or encrypted)."
+    log_error "  $(echo "$PDF_INFO" | tail -n 1)"
+    exit 2
+fi
+PDF_PAGES="$(echo "$PDF_INFO" | awk '/^Pages:/{print $2; exit}')"
+case "$PDF_PAGES" in
+    ''|*[!0-9]*) PDF_PAGES="" ;;
+esac
+if [ -n "$PDF_PAGES" ]; then
+    log_info "Input has $PDF_PAGES page(s)."
+fi
+
+# A PDF that already has real text is about to have it thrown away: every page
+# is rasterised to PNG and re-recognised, so reliable embedded text is replaced
+# by OCR guesses and a small vector file balloons. Re-OCR is a legitimate thing
+# to want, so this warns rather than refuses.
+if command -v pdffonts >/dev/null 2>&1; then
+    FONT_COUNT="$(pdffonts "$INPUT_FILE" 2>/dev/null | tail -n +3 | grep -c . || true)"
+    if [ "${FONT_COUNT:-0}" -gt 0 ]; then
+        if [ "$PRESERVE" = true ]; then
+            log_warn "Input already has a text layer ($FONT_COUNT font(s)); --preserve keeps it and adds OCR on top, so copied text may appear twice."
+        else
+            log_warn "Input already has a text layer ($FONT_COUNT font(s)); OCR will replace it. Use --preserve to keep it."
+        fi
+    fi
 fi
 
 # 5. Execution
@@ -408,6 +494,10 @@ if [ ! -f "${PAGE_IMAGES[0]}" ]; then
     exit 1
 fi
 PAGE_COUNT=${#PAGE_IMAGES[@]}
+if [ -n "$PDF_PAGES" ] && [ "$PAGE_COUNT" -ne "$PDF_PAGES" ]; then
+    log_error "Rasterised $PAGE_COUNT page(s) but the PDF has $PDF_PAGES; refusing to continue."
+    exit 1
+fi
 log_success "Generated $PAGE_COUNT pages."
 
 log_info "Step 2/3: OCR Processing ($OCR_LANG) with $JOBS jobs..."
@@ -415,17 +505,38 @@ log_info "Step 2/3: OCR Processing ($OCR_LANG) with $JOBS jobs..."
 # Export vars for xargs
 export LANG_CODE="$OCR_LANG"
 export VERBOSE
+export PRESERVE
 
 process_page_worker() {
     local img="$1"
     local base="${img%.*}" # remove extension
+    local name
+    name="$(basename "$img")"
     
     if [ "$VERBOSE" = true ]; then
-        echo "Processing $(basename "$img")..." >&2
+        echo "Processing $name..." >&2
     fi
     
-    # tesseract input output -l lang pdf quiet
-    tesseract "$img" "$base" -l "$LANG_CODE" pdf >/dev/null 2>&1
+    # tesseract input output -l lang pdf. Its exit status decides what we report:
+    # ignoring it (as this used to) meant a page whose OCR crashed produced no
+    # page-N.pdf, the merge silently carried on with whatever was left, and the
+    # run exited 0 with a PDF missing pages and no warning anywhere.
+    # Under --preserve the page PDF must carry the recognised text and nothing
+    # else: it is going to be stamped onto the untouched original, so painting
+    # the image again would hide it behind a second, worse copy of itself.
+    local tess_opts=()
+    if [ "$PRESERVE" = true ]; then
+        tess_opts=(-c textonly_pdf=1)
+    fi
+
+    if ! tesseract "$img" "$base" -l "$LANG_CODE" "${tess_opts[@]}" pdf >/dev/null 2>"$base.err"; then
+        # Drop anything half-written, so a truncated page cannot be counted as
+        # a successful one and merged into the output.
+        rm -f "$base.pdf"
+        echo "FAIL $name"
+        return 1
+    fi
+    rm -f "$base.err"
     
     # Signal completion similar to progress
     echo "DONE"
@@ -434,21 +545,31 @@ export -f process_page_worker
 
 # Run parallel OCR and update progress bar
 counter=0
-# We pipe the output of xargs (which prints DONE lines) to our loop
-# Note: stdbuf -oL ensures output isn't buffered so progress updates smoothly
+# We pipe the output of xargs (which prints DONE lines) to our loop.
+# `|| true` on the pipeline: a worker that fails makes xargs exit 123, and under
+# `pipefail` that would abort the script right here — before the counting check
+# below could name the pages that failed. Let the check decide, so the user gets
+# a readable error instead of a bare exit code.
 find "$TEMP_DIR" -name "page-*.png" -print0 | \
     xargs -0 -P "$JOBS" -I {} bash -c 'process_page_worker "$@"' _ {} | \
     while read -r line; do
-        if [ "$line" == "DONE" ]; then
-            counter=$((counter + 1))
-            if [ "$VERBOSE" = false ]; then
-                draw_progress_bar "$counter" "$PAGE_COUNT"
-            fi
-        fi
-    done
+        case "$line" in
+            DONE)
+                counter=$((counter + 1))
+                if [ "$VERBOSE" = false ]; then
+                    report_progress "$counter" "$PAGE_COUNT"
+                fi
+                ;;
+            "FAIL "*)
+                log_error "OCR failed on ${line#FAIL }"
+                ;;
+        esac
+    done || true
 
-echo "" # Newline after progress bar
-log_success "OCR Complete."
+# Close the progress bar's line — but only if one was actually drawn.
+if [ -t 1 ] && [ "$VERBOSE" = false ]; then
+    echo ""
+fi
 
 log_info "Step 3/3: Merging PDF & Finalizing..."
 
@@ -461,17 +582,34 @@ log_info "Step 3/3: Merging PDF & Finalizing..."
 # LAST page, so within one run the glob is already in page order.
 shopt -s nullglob
 PAGE_LIST=("$TEMP_DIR"/page-*.pdf)
+ERR_LIST=("$TEMP_DIR"/page-*.err)
 shopt -u nullglob
 
 PAGE_COUNT_PDF=${#PAGE_LIST[@]}
 
-if [ "$PAGE_COUNT_PDF" -eq 0 ]; then
-    log_warn "No PDF pages to merge."
+# One OCR result per page, or nothing at all. Merging only what survived hands
+# back a PDF quietly missing pages, with exit 0 — the worst possible outcome for
+# a tool people point at documents whose paper originals they are about to bin.
+if [ "$PAGE_COUNT_PDF" -ne "$PAGE_COUNT" ]; then
+    log_error "OCR produced $PAGE_COUNT_PDF page(s) out of $PAGE_COUNT; refusing to write a PDF with pages missing."
+    for err in "${ERR_LIST[@]}"; do
+        err_base="$(basename "$err" .err)"
+        log_error "  $err_base.png: $(tr '\n' ' ' < "$err" | cut -c1-200)"
+    done
     exit 1
 fi
 
+log_success "OCR Complete."
+
+# Under --preserve the merge produces the text layer, not the deliverable: the
+# original file is the deliverable, and it is stamped with this a moment later.
+MERGE_TARGET="$OUTPUT_FILE"
+if [ "$PRESERVE" = true ]; then
+    MERGE_TARGET="$TEMP_DIR/text-layer.pdf"
+fi
+
 if [ "$PAGE_COUNT_PDF" -le 100 ]; then
-    pdfunite "${PAGE_LIST[@]}" "$OUTPUT_FILE"
+    pdfunite "${PAGE_LIST[@]}" "$MERGE_TARGET"
 else
     log_info "Merging $PAGE_COUNT_PDF pages in chunks"
     CHUNK_SIZE=100
@@ -490,7 +628,25 @@ else
     done
     
     log_info "Final merge of ${#CHUNKS[@]} chunks..."
-    pdfunite "${CHUNKS[@]}" "$OUTPUT_FILE"
+    pdfunite "${CHUNKS[@]}" "$MERGE_TARGET"
+fi
+
+if [ "$PRESERVE" = true ]; then
+    log_info "Stamping the text layer onto the original pages..."
+    # qpdf exits 3 when it only had warnings, and pdfunite output reliably earns
+    # one ("reported number of objects is not one plus the highest object
+    # number") while still producing a perfectly good file. Treat 0 and 3 as
+    # success; anything else, or an empty result, is a real failure.
+    set +e
+    qpdf "$INPUT_FILE" --overlay "$MERGE_TARGET" -- "$OUTPUT_FILE" 2>"$TEMP_DIR/qpdf.err"
+    QPDF_RC=$?
+    set -e
+    if { [ "$QPDF_RC" -ne 0 ] && [ "$QPDF_RC" -ne 3 ]; } || [ ! -s "$OUTPUT_FILE" ]; then
+        log_error "qpdf could not stamp the text layer onto '$INPUT_FILE'."
+        while read -r qline; do log_error "  $qline"; done < "$TEMP_DIR/qpdf.err"
+        rm -f "$OUTPUT_FILE"
+        exit 1
+    fi
 fi
 
 log_success "Original PDF merged to: $OUTPUT_FILE"
@@ -511,8 +667,10 @@ fi
 
 if [ "$GEN_MD" = true ]; then
     MD_FILE="$OUT_STEM.md"
-    log_info "Generating markdown file..."
-    # -layout maintains physical layout which is closer to what we want in MD than raw stream
+    log_info "Generating .md file (layout-preserved plain text)..."
+    # Not markdown: `pdftotext -layout` keeps the physical layout with spaces,
+    # it does not emit headings, lists or emphasis. The extension is a
+    # convenience for editors, and the help text now says so.
     pdftotext -layout "$OUTPUT_FILE" "$MD_FILE"
     log_success "Markdown saved to: $MD_FILE"
 fi

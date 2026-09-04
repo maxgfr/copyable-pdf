@@ -8,27 +8,67 @@ on:
 
 jobs:
   test-script:
-    runs-on: ubuntu-latest
+    # The install everyone is told to use is Homebrew on macOS, yet this only
+    # ever ran on Ubuntu — so BSD sed, awk, xargs and mktemp were never exercised.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng poppler-utils imagemagick ghostscript shellcheck
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng poppler-utils imagemagick ghostscript shellcheck qpdf
+          echo "CONVERT=convert" >> "$GITHUB_ENV"
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install tesseract poppler imagemagick ghostscript shellcheck qpdf
+          # ImageMagick 7 renamed the tool; `convert` is a deprecated shim there.
+          echo "CONVERT=magick" >> "$GITHUB_ENV"
 
       - name: Lint
         run: shellcheck -S warning script.sh
 
+      - name: Find a font file the fixtures can be drawn with
+        run: |
+          # Not a font *name*: Homebrew's ImageMagick enumerates none at all
+          # (`magick -list font` is empty), so only a path to a face on disk
+          # works on both runners. A missing -font is a hard error, and the
+          # fixture text has to be legible enough for OCR, so a symbol face
+          # picked at random will not do.
+          for f in \
+            /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf \
+            /usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf \
+            /System/Library/Fonts/Supplemental/Arial.ttf \
+            /System/Library/Fonts/Supplemental/Verdana.ttf; do
+            if [ -f "$f" ]; then
+              echo "FIXTURE_FONT=$f" >> "$GITHUB_ENV"
+              echo "using $f"
+              exit 0
+            fi
+          done
+          found=$(find /usr/share/fonts /System/Library/Fonts /Library/Fonts -type f \
+                    \( -iname '*dejavusans*.ttf' -o -iname '*arial*.ttf' -o -iname '*liberationsans*.ttf' \) \
+                    2>/dev/null | head -n 1)
+          [ -n "$found" ] || { echo "❌ no usable sans font on this runner"; exit 1; }
+          echo "FIXTURE_FONT=$found" >> "$GITHUB_ENV"
+          echo "falling back to $found"
+
       - name: Create Dummy PDF
         run: |
           # Create a simple image with text
-          convert -size 800x600 xc:white -font DejaVu-Sans -pointsize 24 -fill black -draw "text 20,50 'Hello World This is a test PDF for OCR'" page1.png
-          convert -size 800x600 xc:white -font DejaVu-Sans -pointsize 24 -fill black -draw "text 20,50 'Second page with more text'" page2.png
+          $CONVERT -size 800x600 xc:white -font "$FIXTURE_FONT" -pointsize 24 -fill black -draw "text 20,50 'Hello World This is a test PDF for OCR'" page1.png
+          $CONVERT -size 800x600 xc:white -font "$FIXTURE_FONT" -pointsize 24 -fill black -draw "text 20,50 'Second page with more text'" page2.png
 
           # Convert images to PDF
-          convert page1.png page2.png input.pdf
+          $CONVERT page1.png page2.png input.pdf
 
           echo "Created input.pdf"
 
@@ -85,8 +125,8 @@ jobs:
         run: |
           # The merge parsed `ls` output, so word-splitting turned each page path
           # into two non-existent ones. mktemp honours TMPDIR on Linux.
-          mkdir -p "/tmp/with space"
-          TMPDIR="/tmp/with space" ./script.sh -o spaced.pdf input.pdf
+          mkdir -p "${{ runner.temp }}/with space"
+          TMPDIR="${{ runner.temp }}/with space" ./script.sh -o spaced.pdf input.pdf
           pages=$(pdfinfo spaced.pdf | awk '/^Pages/{print $2}')
           [ "$pages" = "2" ] || { echo "❌ expected 2 pages, got $pages"; exit 1; }
           echo "✅ 2 pages with a spaced TMPDIR"
@@ -99,13 +139,103 @@ jobs:
           ! grep -qE '^\s*LANG="?\$(DEFAULT_LANG|2)' script.sh
           echo "✅ \$LANG is not hijacked"
 
+      - name: A failed page aborts the run, it does not ship a short PDF
+        run: |
+          # The worker used to discard tesseract's exit code and print DONE
+          # regardless, so a page whose OCR crashed simply vanished: the merge
+          # carried on with the survivors and the run exited 0.
+          mkdir -p shim
+          real=$(command -v tesseract)
+          cat > shim/tesseract <<SHIM
+          #!/bin/bash
+          for a in "\$@"; do case "\$a" in *page-2.png) echo "simulated OCR crash" >&2; exit 1;; esac; done
+          exec $real "\$@"
+          SHIM
+          chmod +x shim/tesseract
+          set +e
+          PATH="$PWD/shim:$PATH" ./script.sh -o short.pdf input.pdf
+          rc=$?
+          set -e
+          [ "$rc" -eq 1 ] || { echo "❌ expected exit 1, got $rc"; exit 1; }
+          test ! -e short.pdf || { echo "❌ wrote a PDF with a page missing"; exit 1; }
+          echo "✅ failed page aborted the run, nothing written"
+
+      - name: An existing text layer is warned about, not silently replaced
+        run: |
+          # input_ocr.pdf already carries tesseract's invisible font layer, so
+          # re-running on it is exactly the case that used to rasterise good
+          # text away without a word.
+          ./script.sh -o twice.pdf input_ocr.pdf 2> warn.log
+          grep -q "text layer" warn.log || { echo "❌ no warning"; cat warn.log; exit 1; }
+          echo "✅ warned before replacing an existing text layer"
+
+      - name: Progress stays readable when stdout is not a terminal
+        run: |
+          # The bar redrew itself with \r on every page, so a piped run or a CI
+          # log ended up as one unreadable line of bar frames.
+          ./script.sh -o piped.pdf input.pdf > piped.log 2>&1
+          ! grep -q $'\r' piped.log || { echo "❌ carriage returns in a piped log"; exit 1; }
+          echo "✅ no bar frames off a terminal"
+
+      - name: --preserve keeps the original pages instead of rasterising them
+        run: |
+          # The default path throws the original away: every page becomes a
+          # 300 DPI PNG, so vectors, compression and metadata are lost. Preserve
+          # mode stamps an invisible text layer onto the untouched original.
+          ./script.sh -p -o kept.pdf input.pdf
+          pdftotext kept.pdf - | grep -q "Hello World" || { echo "❌ no OCR text"; exit 1; }
+          pages=$(pdfinfo kept.pdf | awk '/^Pages/{print $2}')
+          [ "$pages" = "2" ] || { echo "❌ expected 2 pages, got $pages"; exit 1; }
+
+          # The proof that the original survived: its images come through at
+          # their own resolution, not re-rendered at the OCR DPI.
+          w_in=$(pdfimages -list input.pdf | awk 'NR==3{print $4}')
+          w_kept=$(pdfimages -list kept.pdf | awk 'NR==3{print $4}')
+          w_raster=$(pdfimages -list input_ocr.pdf | awk 'NR==3{print $4}')
+          [ "$w_kept" = "$w_in" ] || { echo "❌ preserve re-rendered the page ($w_kept vs $w_in)"; exit 1; }
+          [ "$w_raster" != "$w_in" ] || { echo "❌ the raster path did not re-render, so this proves nothing"; exit 1; }
+          echo "✅ preserve kept the original ${w_in}px pages; the raster path made them ${w_raster}px"
+
+      - name: More than 100 pages goes through the chunked merge
+        run: |
+          # pdfunite is called in slices of 100 above that count, to stay under
+          # the open-file limit. Nothing ever exercised that branch.
+          $CONVERT page1.png one.pdf
+          args=()
+          for i in $(seq 1 101); do args+=(one.pdf); done
+          pdfunite "${args[@]}" big.pdf
+          [ "$(pdfinfo big.pdf | awk '/^Pages/{print $2}')" = "101" ] || { echo "❌ fixture is not 101 pages"; exit 1; }
+          ./script.sh -d 72 -o chunked.pdf big.pdf
+          pages=$(pdfinfo chunked.pdf | awk '/^Pages/{print $2}')
+          [ "$pages" = "101" ] || { echo "❌ expected 101 pages, got $pages"; exit 1; }
+          echo "✅ 101 pages survived the chunked merge"
+
       - name: Bad input fails fast, before any OCR
         run: |
+          mkdir -p outdir
+          printf 'this is not a pdf\n' > notpdf.pdf
+          cp input.pdf self.pdf
           set +e
           ./script.sh -l;                              [ $? -eq 2 ] || { echo "❌ missing -l value"; exit 1; }
           ./script.sh -d abc -o x.pdf input.pdf;       [ $? -eq 2 ] || { echo "❌ bad dpi"; exit 1; }
           ./script.sh -j 0 -o x.pdf input.pdf;         [ $? -eq 2 ] || { echo "❌ bad jobs"; exit 1; }
           ./script.sh -o nope/x.pdf input.pdf;         [ $? -eq 2 ] || { echo "❌ missing out dir"; exit 1; }
+          ./script.sh -o outdir/ input.pdf;            [ $? -eq 2 ] || { echo "❌ output is a directory"; exit 1; }
+          ./script.sh -o outdir input.pdf;             [ $? -eq 2 ] || { echo "❌ output is a directory"; exit 1; }
+          ./script.sh -o self.pdf self.pdf;            [ $? -eq 2 ] || { echo "❌ output overwrites input"; exit 1; }
+          ./script.sh -o x.pdf notpdf.pdf;             [ $? -eq 2 ] || { echo "❌ input is not a PDF"; exit 1; }
           set -e
           test ! -e x.pdf
+          # The source must still be the source, not a rasterised copy of itself.
+          cmp -s self.pdf input.pdf || { echo "❌ the input was overwritten"; exit 1; }
           echo "✅ all rejected with exit 2, nothing written"
+
+      - name: --version prints the version
+        run: |
+          declared=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' script.sh)
+          [ -n "$declared" ] || { echo "❌ no VERSION= in script.sh"; exit 1; }
+          for flag in -V --version; do
+            out=$(./script.sh $flag)
+            [ "$out" = "copyable-pdf $declared" ] || { echo "❌ $flag printed '$out'"; exit 1; }
+          done
+          echo "✅ version reported as $declared"

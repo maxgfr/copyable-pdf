@@ -69,6 +69,7 @@ copyable-pdf [options] input.pdf
 | `-j, --jobs <num>` | Number of parallel jobs | Auto-detect |
 | `-t, --text` | Generate an additional .txt file | `false` |
 | `-m, --markdown` | Generate an additional .md file (layout-preserved plain text) | `false` |
+| `-p, --preserve` | Keep the original pages, add an invisible text layer on top (needs `qpdf`) | `false` |
 | `-k, --keep` | Keep temporary files (debug) | `false` |
 | `-v, --verbose` | Verbose output | `false` |
 | `-h, --help` | Show help message | - |
@@ -89,6 +90,33 @@ copyable-pdf -l fra -d 600 document.pdf
 ```bash
 copyable-pdf -o searchable_doc.pdf scan.pdf
 ```
+
+**Keep the original pages untouched:**
+```bash
+copyable-pdf --preserve scan.pdf
+```
+
+## Preserve mode
+
+By default `copyable-pdf` rebuilds the document: every page is rendered to a
+300 DPI image, recognised, and the images are merged into a new PDF. That works
+anywhere, but the result is a re-encoded copy — a scan stored as JBIG2 or CCITT
+can grow several times over, and vector text, bookmarks and metadata are gone.
+
+`--preserve` takes the other route. Pages are still rendered and recognised, but
+only the recognised text is kept, as an invisible layer that is stamped onto the
+untouched original with `qpdf`. Images, vectors, bookmarks, metadata and file
+size stay as they were, and the text is selectable on top.
+
+It needs one extra tool, and only when the flag is used:
+
+```bash
+brew install qpdf          # macOS
+sudo apt-get install qpdf  # Ubuntu/Debian
+```
+
+Use it for anything you care about keeping. Use the default when you have no
+`qpdf` and a plain searchable copy is enough.
 
 ## License
 

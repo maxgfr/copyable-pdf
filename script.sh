@@ -16,6 +16,7 @@ VERBOSE=false
 COLOR_SUPPORT=true
 GEN_TEXT=false
 GEN_MD=false
+PRESERVE=false
 
 # --- Colors ---
 if [ -t 1 ] && [ "$COLOR_SUPPORT" = true ]; then
@@ -107,6 +108,9 @@ print_usage() {
     echo "  -j, --jobs <num>     Number of parallel jobs (default: auto)"
     echo "  -t, --text           Generate an additional .txt file"
     echo "  -m, --markdown       Generate an additional .md file (layout-preserved plain text)"
+    echo "  -p, --preserve       Keep the original pages and add an invisible text"
+    echo "                       layer on top (needs qpdf) instead of rebuilding"
+    echo "                       the PDF from rasterised images"
     echo "  -k, --keep           Keep temporary files (debug mode)"
     echo "  -v, --verbose        Verbose output"
     echo "  -h, --help           Show this help message"
@@ -116,6 +120,7 @@ print_usage() {
     echo "  copyable-pdf document.pdf"
     echo "  copyable-pdf -l fra+eng -t document.pdf"
     echo "  copyable-pdf --jobs 8 -k document.pdf"
+    echo "  copyable-pdf --preserve scan.pdf"
 }
 
 ask_yes_no() {
@@ -279,6 +284,10 @@ while [[ $# -gt 0 ]]; do
             GEN_MD=true
             shift
             ;;
+        -p|--preserve)
+            PRESERVE=true
+            shift
+            ;;
         -k|--keep)
             KEEP_TEMP=true
             shift
@@ -411,6 +420,7 @@ if [ "$VERBOSE" = true ]; then
     echo "  Jobs:      $JOBS"
     echo "  Text:      $GEN_TEXT"
     echo "  Markdown:  $GEN_MD"
+    echo "  Preserve:  $PRESERVE"
     echo ""
 fi
 
@@ -427,6 +437,11 @@ if ! command -v pdfunite >/dev/null 2>&1; then
     exit 1
 fi
 require_command pdfinfo poppler
+# Only --preserve needs qpdf, so the default path keeps its dependency list to
+# tesseract and poppler.
+if [ "$PRESERVE" = true ]; then
+    require_command qpdf qpdf
+fi
 
 # Only now can the input be checked: pdfinfo ships with poppler, so this has to
 # come after the dependency checks. A corrupt or password-protected PDF used to
@@ -452,7 +467,11 @@ fi
 if command -v pdffonts >/dev/null 2>&1; then
     FONT_COUNT="$(pdffonts "$INPUT_FILE" 2>/dev/null | tail -n +3 | grep -c . || true)"
     if [ "${FONT_COUNT:-0}" -gt 0 ]; then
-        log_warn "Input already has a text layer ($FONT_COUNT font(s)); OCR will replace it."
+        if [ "$PRESERVE" = true ]; then
+            log_warn "Input already has a text layer ($FONT_COUNT font(s)); --preserve keeps it and adds OCR on top, so copied text may appear twice."
+        else
+            log_warn "Input already has a text layer ($FONT_COUNT font(s)); OCR will replace it. Use --preserve to keep it."
+        fi
     fi
 fi
 
@@ -486,6 +505,7 @@ log_info "Step 2/3: OCR Processing ($OCR_LANG) with $JOBS jobs..."
 # Export vars for xargs
 export LANG_CODE="$OCR_LANG"
 export VERBOSE
+export PRESERVE
 
 process_page_worker() {
     local img="$1"
@@ -501,7 +521,15 @@ process_page_worker() {
     # ignoring it (as this used to) meant a page whose OCR crashed produced no
     # page-N.pdf, the merge silently carried on with whatever was left, and the
     # run exited 0 with a PDF missing pages and no warning anywhere.
-    if ! tesseract "$img" "$base" -l "$LANG_CODE" pdf >/dev/null 2>"$base.err"; then
+    # Under --preserve the page PDF must carry the recognised text and nothing
+    # else: it is going to be stamped onto the untouched original, so painting
+    # the image again would hide it behind a second, worse copy of itself.
+    local tess_opts=()
+    if [ "$PRESERVE" = true ]; then
+        tess_opts=(-c textonly_pdf=1)
+    fi
+
+    if ! tesseract "$img" "$base" -l "$LANG_CODE" "${tess_opts[@]}" pdf >/dev/null 2>"$base.err"; then
         echo "FAIL $name"
         return 1
     fi
@@ -570,8 +598,15 @@ fi
 
 log_success "OCR Complete."
 
+# Under --preserve the merge produces the text layer, not the deliverable: the
+# original file is the deliverable, and it is stamped with this a moment later.
+MERGE_TARGET="$OUTPUT_FILE"
+if [ "$PRESERVE" = true ]; then
+    MERGE_TARGET="$TEMP_DIR/text-layer.pdf"
+fi
+
 if [ "$PAGE_COUNT_PDF" -le 100 ]; then
-    pdfunite "${PAGE_LIST[@]}" "$OUTPUT_FILE"
+    pdfunite "${PAGE_LIST[@]}" "$MERGE_TARGET"
 else
     log_info "Merging $PAGE_COUNT_PDF pages in chunks"
     CHUNK_SIZE=100
@@ -590,7 +625,25 @@ else
     done
     
     log_info "Final merge of ${#CHUNKS[@]} chunks..."
-    pdfunite "${CHUNKS[@]}" "$OUTPUT_FILE"
+    pdfunite "${CHUNKS[@]}" "$MERGE_TARGET"
+fi
+
+if [ "$PRESERVE" = true ]; then
+    log_info "Stamping the text layer onto the original pages..."
+    # qpdf exits 3 when it only had warnings, and pdfunite output reliably earns
+    # one ("reported number of objects is not one plus the highest object
+    # number") while still producing a perfectly good file. Treat 0 and 3 as
+    # success; anything else, or an empty result, is a real failure.
+    set +e
+    qpdf "$INPUT_FILE" --overlay "$MERGE_TARGET" -- "$OUTPUT_FILE" 2>"$TEMP_DIR/qpdf.err"
+    QPDF_RC=$?
+    set -e
+    if { [ "$QPDF_RC" -ne 0 ] && [ "$QPDF_RC" -ne 3 ]; } || [ ! -s "$OUTPUT_FILE" ]; then
+        log_error "qpdf could not stamp the text layer onto '$INPUT_FILE'."
+        while read -r qline; do log_error "  $qline"; done < "$TEMP_DIR/qpdf.err"
+        rm -f "$OUTPUT_FILE"
+        exit 1
+    fi
 fi
 
 log_success "Original PDF merged to: $OUTPUT_FILE"

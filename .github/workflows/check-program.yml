@@ -16,7 +16,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng poppler-utils imagemagick ghostscript shellcheck
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng poppler-utils imagemagick ghostscript shellcheck qpdf
 
       - name: Lint
         run: shellcheck -S warning script.sh
@@ -136,6 +136,25 @@ jobs:
           ./script.sh -o piped.pdf input.pdf > piped.log 2>&1
           ! grep -q $'\r' piped.log || { echo "❌ carriage returns in a piped log"; exit 1; }
           echo "✅ no bar frames off a terminal"
+
+      - name: --preserve keeps the original pages instead of rasterising them
+        run: |
+          # The default path throws the original away: every page becomes a
+          # 300 DPI PNG, so vectors, compression and metadata are lost. Preserve
+          # mode stamps an invisible text layer onto the untouched original.
+          ./script.sh -p -o kept.pdf input.pdf
+          pdftotext kept.pdf - | grep -q "Hello World" || { echo "❌ no OCR text"; exit 1; }
+          pages=$(pdfinfo kept.pdf | awk '/^Pages/{print $2}')
+          [ "$pages" = "2" ] || { echo "❌ expected 2 pages, got $pages"; exit 1; }
+
+          # The proof that the original survived: its images come through at
+          # their own resolution, not re-rendered at the OCR DPI.
+          w_in=$(pdfimages -list input.pdf | awk 'NR==3{print $4}')
+          w_kept=$(pdfimages -list kept.pdf | awk 'NR==3{print $4}')
+          w_raster=$(pdfimages -list input_ocr.pdf | awk 'NR==3{print $4}')
+          [ "$w_kept" = "$w_in" ] || { echo "❌ preserve re-rendered the page ($w_kept vs $w_in)"; exit 1; }
+          [ "$w_raster" != "$w_in" ] || { echo "❌ the raster path did not re-render, so this proves nothing"; exit 1; }
+          echo "✅ preserve kept the original ${w_in}px pages; the raster path made them ${w_raster}px"
 
       - name: Bad input fails fast, before any OCR
         run: |

@@ -99,6 +99,27 @@ jobs:
           ! grep -qE '^\s*LANG="?\$(DEFAULT_LANG|2)' script.sh
           echo "✅ \$LANG is not hijacked"
 
+      - name: A failed page aborts the run, it does not ship a short PDF
+        run: |
+          # The worker used to discard tesseract's exit code and print DONE
+          # regardless, so a page whose OCR crashed simply vanished: the merge
+          # carried on with the survivors and the run exited 0.
+          mkdir -p shim
+          real=$(command -v tesseract)
+          cat > shim/tesseract <<SHIM
+          #!/bin/bash
+          for a in "\$@"; do case "\$a" in *page-2.png) echo "simulated OCR crash" >&2; exit 1;; esac; done
+          exec $real "\$@"
+          SHIM
+          chmod +x shim/tesseract
+          set +e
+          PATH="$PWD/shim:$PATH" ./script.sh -o short.pdf input.pdf
+          rc=$?
+          set -e
+          [ "$rc" -eq 1 ] || { echo "❌ expected exit 1, got $rc"; exit 1; }
+          test ! -e short.pdf || { echo "❌ wrote a PDF with a page missing"; exit 1; }
+          echo "✅ failed page aborted the run, nothing written"
+
       - name: Bad input fails fast, before any OCR
         run: |
           set +e

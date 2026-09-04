@@ -5,7 +5,7 @@
 #  Converts PDF to Images -> OCRs Images -> Merges back to Searchable PDF
 # ==============================================================================
 
-set -e
+set -eo pipefail
 
 # --- Configuration & Defaults ---
 VERSION="1.2.3"
@@ -419,13 +419,22 @@ export VERBOSE
 process_page_worker() {
     local img="$1"
     local base="${img%.*}" # remove extension
+    local name
+    name="$(basename "$img")"
     
     if [ "$VERBOSE" = true ]; then
-        echo "Processing $(basename "$img")..." >&2
+        echo "Processing $name..." >&2
     fi
     
-    # tesseract input output -l lang pdf quiet
-    tesseract "$img" "$base" -l "$LANG_CODE" pdf >/dev/null 2>&1
+    # tesseract input output -l lang pdf. Its exit status decides what we report:
+    # ignoring it (as this used to) meant a page whose OCR crashed produced no
+    # page-N.pdf, the merge silently carried on with whatever was left, and the
+    # run exited 0 with a PDF missing pages and no warning anywhere.
+    if ! tesseract "$img" "$base" -l "$LANG_CODE" pdf >/dev/null 2>"$base.err"; then
+        echo "FAIL $name"
+        return 1
+    fi
+    rm -f "$base.err"
     
     # Signal completion similar to progress
     echo "DONE"
@@ -434,21 +443,28 @@ export -f process_page_worker
 
 # Run parallel OCR and update progress bar
 counter=0
-# We pipe the output of xargs (which prints DONE lines) to our loop
-# Note: stdbuf -oL ensures output isn't buffered so progress updates smoothly
+# We pipe the output of xargs (which prints DONE lines) to our loop.
+# `|| true` on the pipeline: a worker that fails makes xargs exit 123, and under
+# `pipefail` that would abort the script right here — before the counting check
+# below could name the pages that failed. Let the check decide, so the user gets
+# a readable error instead of a bare exit code.
 find "$TEMP_DIR" -name "page-*.png" -print0 | \
     xargs -0 -P "$JOBS" -I {} bash -c 'process_page_worker "$@"' _ {} | \
     while read -r line; do
-        if [ "$line" == "DONE" ]; then
-            counter=$((counter + 1))
-            if [ "$VERBOSE" = false ]; then
-                draw_progress_bar "$counter" "$PAGE_COUNT"
-            fi
-        fi
-    done
+        case "$line" in
+            DONE)
+                counter=$((counter + 1))
+                if [ "$VERBOSE" = false ]; then
+                    draw_progress_bar "$counter" "$PAGE_COUNT"
+                fi
+                ;;
+            "FAIL "*)
+                log_error "OCR failed on ${line#FAIL }"
+                ;;
+        esac
+    done || true
 
 echo "" # Newline after progress bar
-log_success "OCR Complete."
 
 log_info "Step 3/3: Merging PDF & Finalizing..."
 
@@ -461,14 +477,24 @@ log_info "Step 3/3: Merging PDF & Finalizing..."
 # LAST page, so within one run the glob is already in page order.
 shopt -s nullglob
 PAGE_LIST=("$TEMP_DIR"/page-*.pdf)
+ERR_LIST=("$TEMP_DIR"/page-*.err)
 shopt -u nullglob
 
 PAGE_COUNT_PDF=${#PAGE_LIST[@]}
 
-if [ "$PAGE_COUNT_PDF" -eq 0 ]; then
-    log_warn "No PDF pages to merge."
+# One OCR result per page, or nothing at all. Merging only what survived hands
+# back a PDF quietly missing pages, with exit 0 — the worst possible outcome for
+# a tool people point at documents whose paper originals they are about to bin.
+if [ "$PAGE_COUNT_PDF" -ne "$PAGE_COUNT" ]; then
+    log_error "OCR produced $PAGE_COUNT_PDF page(s) out of $PAGE_COUNT; refusing to write a PDF with pages missing."
+    for err in "${ERR_LIST[@]}"; do
+        err_base="$(basename "$err" .err)"
+        log_error "  $err_base.png: $(tr '\n' ' ' < "$err" | cut -c1-200)"
+    done
     exit 1
 fi
+
+log_success "OCR Complete."
 
 if [ "$PAGE_COUNT_PDF" -le 100 ]; then
     pdfunite "${PAGE_LIST[@]}" "$OUTPUT_FILE"

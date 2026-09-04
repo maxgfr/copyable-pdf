@@ -8,27 +8,60 @@ on:
 
 jobs:
   test-script:
-    runs-on: ubuntu-latest
+    # The install everyone is told to use is Homebrew on macOS, yet this only
+    # ever ran on Ubuntu — so BSD sed, awk, xargs and mktemp were never exercised.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y tesseract-ocr tesseract-ocr-eng poppler-utils imagemagick ghostscript shellcheck qpdf
+          echo "CONVERT=convert" >> "$GITHUB_ENV"
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install tesseract poppler imagemagick ghostscript shellcheck qpdf
+          # ImageMagick 7 renamed the tool; `convert` is a deprecated shim there.
+          echo "CONVERT=magick" >> "$GITHUB_ENV"
 
       - name: Lint
         run: shellcheck -S warning script.sh
 
+      - name: Pick a font the fixtures can be drawn with
+        run: |
+          # Font names differ between a Debian ImageMagick and a Homebrew one,
+          # and a missing -font is a hard error. Take the first plain sans face
+          # this machine actually reports, whatever it is called here.
+          available=$($CONVERT -list font | awk '/^ *Font: /{print $2}')
+          for candidate in DejaVu-Sans Helvetica Arial LiberationSans-Regular; do
+            if printf '%s\n' "$available" | grep -qx "$candidate"; then
+              echo "FIXTURE_FONT=$candidate" >> "$GITHUB_ENV"
+              echo "using $candidate"
+              exit 0
+            fi
+          done
+          first=$(printf '%s\n' "$available" | head -n 1)
+          [ -n "$first" ] || { echo "❌ ImageMagick lists no fonts at all"; exit 1; }
+          echo "FIXTURE_FONT=$first" >> "$GITHUB_ENV"
+          echo "falling back to $first"
+
       - name: Create Dummy PDF
         run: |
           # Create a simple image with text
-          convert -size 800x600 xc:white -font DejaVu-Sans -pointsize 24 -fill black -draw "text 20,50 'Hello World This is a test PDF for OCR'" page1.png
-          convert -size 800x600 xc:white -font DejaVu-Sans -pointsize 24 -fill black -draw "text 20,50 'Second page with more text'" page2.png
+          $CONVERT -size 800x600 xc:white -font $FIXTURE_FONT -pointsize 24 -fill black -draw "text 20,50 'Hello World This is a test PDF for OCR'" page1.png
+          $CONVERT -size 800x600 xc:white -font $FIXTURE_FONT -pointsize 24 -fill black -draw "text 20,50 'Second page with more text'" page2.png
 
           # Convert images to PDF
-          convert page1.png page2.png input.pdf
+          $CONVERT page1.png page2.png input.pdf
 
           echo "Created input.pdf"
 
@@ -85,8 +118,8 @@ jobs:
         run: |
           # The merge parsed `ls` output, so word-splitting turned each page path
           # into two non-existent ones. mktemp honours TMPDIR on Linux.
-          mkdir -p "/tmp/with space"
-          TMPDIR="/tmp/with space" ./script.sh -o spaced.pdf input.pdf
+          mkdir -p "${{ runner.temp }}/with space"
+          TMPDIR="${{ runner.temp }}/with space" ./script.sh -o spaced.pdf input.pdf
           pages=$(pdfinfo spaced.pdf | awk '/^Pages/{print $2}')
           [ "$pages" = "2" ] || { echo "❌ expected 2 pages, got $pages"; exit 1; }
           echo "✅ 2 pages with a spaced TMPDIR"
@@ -155,6 +188,20 @@ jobs:
           [ "$w_kept" = "$w_in" ] || { echo "❌ preserve re-rendered the page ($w_kept vs $w_in)"; exit 1; }
           [ "$w_raster" != "$w_in" ] || { echo "❌ the raster path did not re-render, so this proves nothing"; exit 1; }
           echo "✅ preserve kept the original ${w_in}px pages; the raster path made them ${w_raster}px"
+
+      - name: More than 100 pages goes through the chunked merge
+        run: |
+          # pdfunite is called in slices of 100 above that count, to stay under
+          # the open-file limit. Nothing ever exercised that branch.
+          $CONVERT page1.png one.pdf
+          args=()
+          for i in $(seq 1 101); do args+=(one.pdf); done
+          pdfunite "${args[@]}" big.pdf
+          [ "$(pdfinfo big.pdf | awk '/^Pages/{print $2}')" = "101" ] || { echo "❌ fixture is not 101 pages"; exit 1; }
+          ./script.sh -d 72 -o chunked.pdf big.pdf
+          pages=$(pdfinfo chunked.pdf | awk '/^Pages/{print $2}')
+          [ "$pages" = "101" ] || { echo "❌ expected 101 pages, got $pages"; exit 1; }
+          echo "✅ 101 pages survived the chunked merge"
 
       - name: Bad input fails fast, before any OCR
         run: |

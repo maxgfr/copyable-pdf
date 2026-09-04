@@ -120,6 +120,23 @@ jobs:
           test ! -e short.pdf || { echo "❌ wrote a PDF with a page missing"; exit 1; }
           echo "✅ failed page aborted the run, nothing written"
 
+      - name: An existing text layer is warned about, not silently replaced
+        run: |
+          # input_ocr.pdf already carries tesseract's invisible font layer, so
+          # re-running on it is exactly the case that used to rasterise good
+          # text away without a word.
+          ./script.sh -o twice.pdf input_ocr.pdf 2> warn.log
+          grep -q "text layer" warn.log || { echo "❌ no warning"; cat warn.log; exit 1; }
+          echo "✅ warned before replacing an existing text layer"
+
+      - name: Progress stays readable when stdout is not a terminal
+        run: |
+          # The bar redrew itself with \r on every page, so a piped run or a CI
+          # log ended up as one unreadable line of bar frames.
+          ./script.sh -o piped.pdf input.pdf > piped.log 2>&1
+          ! grep -q $'\r' piped.log || { echo "❌ carriage returns in a piped log"; exit 1; }
+          echo "✅ no bar frames off a terminal"
+
       - name: Bad input fails fast, before any OCR
         run: |
           mkdir -p outdir

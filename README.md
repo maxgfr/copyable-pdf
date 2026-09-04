@@ -68,7 +68,7 @@ copyable-pdf [options] input.pdf
 | `-d, --dpi <num>` | DPI resolution for OCR | `300` |
 | `-j, --jobs <num>` | Number of parallel jobs | Auto-detect |
 | `-t, --text` | Generate an additional .txt file | `false` |
-| `-m, --markdown` | Generate an additional .md file | `false` |
+| `-m, --markdown` | Generate an additional .md file (layout-preserved plain text) | `false` |
 | `-k, --keep` | Keep temporary files (debug) | `false` |
 | `-v, --verbose` | Verbose output | `false` |
 | `-h, --help` | Show help message | - |

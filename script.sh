@@ -67,6 +67,20 @@ draw_progress_bar() {
     printf "] %d%% (%d/%d)" "$percent" "$current" "$total"
 }
 
+# A redrawn bar is meaningless once stdout is a file: piping a run to a log or
+# to CI used to bury the output under hundreds of \r-joined bar frames on one
+# unreadable line. Off a terminal, report a plain line now and then instead.
+report_progress() {
+    local current="$1"
+    local total="$2"
+
+    if [ -t 1 ]; then
+        draw_progress_bar "$current" "$total"
+    elif [ $((current % 10)) -eq 0 ] || [ "$current" -eq "$total" ]; then
+        log_info "page $current/$total"
+    fi
+}
+
 print_banner() {
     echo -e "${BLUE}"
     echo "  ██████╗ ██████╗ ██████╗ ██╗   ██╗ █████╗ ██████╗ ██╗     ███████╗      ██████╗ ██████╗ ███████╗"
@@ -92,7 +106,7 @@ print_usage() {
     echo "  -d, --dpi <num>      DPI resolution for OCR (default: 300)"
     echo "  -j, --jobs <num>     Number of parallel jobs (default: auto)"
     echo "  -t, --text           Generate an additional .txt file"
-    echo "  -m, --markdown       Generate an additional .md file"
+    echo "  -m, --markdown       Generate an additional .md file (layout-preserved plain text)"
     echo "  -k, --keep           Keep temporary files (debug mode)"
     echo "  -v, --verbose        Verbose output"
     echo "  -h, --help           Show this help message"
@@ -312,7 +326,7 @@ if [ -z "$INPUT_FILE" ]; then
     DPI=$(prompt_input "DPI Resolution" "$DEFAULT_DPI")
 
     if ask_yes_no "Generate text file (.txt)?"; then GEN_TEXT=true; fi
-    if ask_yes_no "Generate markdown file (.md)?"; then GEN_MD=true; fi
+    if ask_yes_no "Generate .md file (layout-preserved plain text)?"; then GEN_MD=true; fi
 
     # Optional Output. NOT `local` — this block runs at script scope, not inside
     # a function, where bash rejects `local` outright ("can only be used in a
@@ -431,6 +445,17 @@ if [ -n "$PDF_PAGES" ]; then
     log_info "Input has $PDF_PAGES page(s)."
 fi
 
+# A PDF that already has real text is about to have it thrown away: every page
+# is rasterised to PNG and re-recognised, so reliable embedded text is replaced
+# by OCR guesses and a small vector file balloons. Re-OCR is a legitimate thing
+# to want, so this warns rather than refuses.
+if command -v pdffonts >/dev/null 2>&1; then
+    FONT_COUNT="$(pdffonts "$INPUT_FILE" 2>/dev/null | tail -n +3 | grep -c . || true)"
+    if [ "${FONT_COUNT:-0}" -gt 0 ]; then
+        log_warn "Input already has a text layer ($FONT_COUNT font(s)); OCR will replace it."
+    fi
+fi
+
 # 5. Execution
 
 TEMP_DIR=$(mktemp -d)
@@ -501,7 +526,7 @@ find "$TEMP_DIR" -name "page-*.png" -print0 | \
             DONE)
                 counter=$((counter + 1))
                 if [ "$VERBOSE" = false ]; then
-                    draw_progress_bar "$counter" "$PAGE_COUNT"
+                    report_progress "$counter" "$PAGE_COUNT"
                 fi
                 ;;
             "FAIL "*)
@@ -510,7 +535,10 @@ find "$TEMP_DIR" -name "page-*.png" -print0 | \
         esac
     done || true
 
-echo "" # Newline after progress bar
+# Close the progress bar's line — but only if one was actually drawn.
+if [ -t 1 ] && [ "$VERBOSE" = false ]; then
+    echo ""
+fi
 
 log_info "Step 3/3: Merging PDF & Finalizing..."
 
@@ -583,8 +611,10 @@ fi
 
 if [ "$GEN_MD" = true ]; then
     MD_FILE="$OUT_STEM.md"
-    log_info "Generating markdown file..."
-    # -layout maintains physical layout which is closer to what we want in MD than raw stream
+    log_info "Generating .md file (layout-preserved plain text)..."
+    # Not markdown: `pdftotext -layout` keeps the physical layout with spaces,
+    # it does not emit headings, lists or emphasis. The extension is a
+    # convenience for editors, and the help text now says so.
     pdftotext -layout "$OUTPUT_FILE" "$MD_FILE"
     log_success "Markdown saved to: $MD_FILE"
 fi

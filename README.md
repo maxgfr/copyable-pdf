@@ -31,6 +31,19 @@
 brew install maxgfr/tap/copyable-pdf
 ```
 
+### As an agent skill
+
+Teach your coding agent (Claude Code, Codex, Cursor and others) when and how to
+use `copyable-pdf`:
+
+```bash
+npx skills add maxgfr/copyable-pdf
+```
+
+Add `-g` to install it for every project. The skill lives in
+[`skills/copyable-pdf`](skills/copyable-pdf/SKILL.md). It drives the CLI, so
+install the CLI as well.
+
 ### Manual Installation
 
 1.  Clone the repository:

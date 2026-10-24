@@ -8,7 +8,7 @@
 set -eo pipefail
 
 # --- Configuration & Defaults ---
-VERSION="1.4.0"
+VERSION="1.5.0"
 DEFAULT_DPI=300
 DEFAULT_LANG="eng"
 KEEP_TEMP=false

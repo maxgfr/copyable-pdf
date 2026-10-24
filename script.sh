@@ -1051,15 +1051,17 @@ fi
 # that the OCR reads as junk lines. Done in place: the cleaned image is
 # both what gets recognised and what the output page shows.
 # The blur runs on a 1/10 thumbnail scaled back to the page's exact size: the
-# same lighting map, but in 2 s a page instead of 12.
+# same lighting map, but in 2 s a page instead of 12. Two passes, because the
+# deskew decides that size and ImageMagick 6 cannot feed it back into -resize
+# within one command (no %[...] escapes in its geometry arguments).
 clean_page() {
     local img="$1"
     local base="${img%.*}"
-    if ! "$IM" "$img" -background white -deskew 40% +repage \
-            -set option:pagesize '%wx%h' \
-            \( +clone -scale 10% -blur 0x2.5 -resize '%[pagesize]!' \) \
-            -compose Divide_Src -composite \
-            "$img" 2>"$base.err"; then
+    local size
+    if ! size="$("$IM" "$img" -background white -deskew 40% +repage \
+                    -write "$img" -format '%wx%h' info: 2>"$base.err")" ||
+       ! "$IM" "$img" \( +clone -scale 10% -blur 0x2.5 -resize "${size}!" \) \
+            -compose Divide_Src -composite "$img" 2>>"$base.err"; then
         echo "FAIL $(basename "$img")"
         return 1
     fi

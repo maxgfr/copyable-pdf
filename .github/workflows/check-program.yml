@@ -265,14 +265,16 @@ jobs:
           pdftotext models.pdf - | grep -q "Hello World" || { echo "❌ no OCR text"; exit 1; }
           echo "✅ bare model directory works"
 
-      # --- PaddleOCR. The tiny model keeps the runs short; the install is the
-      # same whatever the size. ---
+      # --- PaddleOCR. Where only the plumbing is under test, the tiny model keeps
+      # the runs short; the install is the same whatever the size. ---
 
       - name: --paddle reads what Tesseract cannot, and leaves nothing behind
         run: |
           # noisy.pdf without --clean: Tesseract returns nothing (checked above).
-          ./script.sh --paddle --paddle-model tiny -o noisy_paddle.pdf noisy.pdf
-          pdftotext noisy_paddle.pdf - | grep -q "black quartz" || { echo "❌ no text"; pdftotext noisy_paddle.pdf -; exit 1; }
+          # The default model: tiny reads it too, but with a typo or two.
+          ./script.sh --paddle -o noisy_paddle.pdf noisy.pdf
+          text=$(pdftotext noisy_paddle.pdf -)
+          echo "$text" | grep -q "brown fox" && echo "$text" | grep -q "zebras" || { echo "❌ text missing"; echo "$text"; exit 1; }
           # Installed into the run's temp dir by default, so no trace may remain.
           test ! -e "$HOME/.cache/copyable-pdf" || { echo "❌ left an install in ~/.cache"; exit 1; }
           echo "✅ PaddleOCR read the noisy page and cleaned up after itself"

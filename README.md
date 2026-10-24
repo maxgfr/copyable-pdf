@@ -11,6 +11,11 @@
 -   **OCR**: Make scanned documents searchable and copyable.
 -   **Preserve mode**: Keep the original pages untouched and add an invisible
     text layer on top, instead of rebuilding the PDF from images.
+-   **Better recognition out of the box**: Upside-down pages are turned
+    automatically, and shadows or yellowed corners no longer hide the text in
+    them.
+-   **Clean mode**: Straighten crooked scans and flatten uneven lighting before
+    OCR.
 -   **Parallel Processing**: Uses multiple cores for faster OCR.
 -   **Text sidecars**: Also write the recognised text as `.txt` or `.md`.
 -   **Interactive mode**: Run it with no arguments and it asks for each setting.
@@ -48,17 +53,20 @@ Ensure you have the following installed:
 -   **tesseract**: For OCR.
 -   **poppler**: For `pdftoppm`, `pdfunite`, `pdfinfo` and `pdftotext`.
 -   **qpdf** (optional): Only needed for `--preserve`.
+-   **ImageMagick** (optional): Only needed for `--clean`.
 
 On macOS (Homebrew):
 ```bash
 brew install tesseract poppler
 brew install qpdf            # optional, for --preserve
+brew install imagemagick     # optional, for --clean
 ```
 
 On Ubuntu/Debian:
 ```bash
 sudo apt-get install tesseract-ocr poppler-utils
 sudo apt-get install qpdf    # optional, for --preserve
+sudo apt-get install imagemagick  # optional, for --clean
 ```
 
 ## Usage
@@ -73,7 +81,11 @@ the language, the DPI, the sidecars and the output name in turn.
 ### How it works
 
 1.  Every page is rendered to an image at the chosen DPI, and Tesseract
-    recognises the text on it, several pages at a time.
+    recognises the text on it, several pages at a time. Tesseract first detects
+    each page's orientation, so a page scanned upside down is read the right
+    way up, and it thresholds each region of the page on its own (Sauvola), so
+    a shadow does not blacken the text under it. With `--clean`, each page is
+    also straightened and its lighting evened out before that.
 2.  By default those recognised pages are merged into a **new** PDF. The result
     is searchable everywhere, but it is a re-encoded copy of the original.
 3.  With `--preserve`, only the recognised text is kept and stamped onto the
@@ -93,6 +105,9 @@ handing back a document that is quietly missing pages.
 | `-t, --text` | Generate an additional .txt file | `false` |
 | `-m, --markdown` | Generate an additional .md file (layout-preserved plain text) | `false` |
 | `-p, --preserve` | Keep the original pages, add an invisible text layer on top (needs `qpdf`) | `false` |
+| `-c, --clean` | Straighten pages and flatten shadows before OCR (needs ImageMagick). The cleaned page is what the output shows. Not with `--preserve` | `false` |
+| `--plain` | Skip automatic rotation and adaptive thresholding (the pre-1.4 behaviour) | `false` |
+| `--tessdata-dir <path>` | Read language models from this directory, e.g. a [`tessdata_best`](https://github.com/tesseract-ocr/tessdata_best) checkout | system tessdata |
 | `-k, --keep` | Keep temporary files (debug) | `false` |
 | `-v, --verbose` | Verbose output | `false` |
 | `-h, --help` | Show help message | - |
@@ -119,6 +134,30 @@ copyable-pdf -o searchable_doc.pdf scan.pdf
 ```bash
 copyable-pdf --preserve scan.pdf
 ```
+
+**Clean up a crooked phone photo of a French page:**
+```bash
+copyable-pdf --clean -l fra photo.pdf
+```
+
+## Getting the best results
+
+-   **Set the right language.** It matters more than any other setting. Use
+    `-l fra`, or `-l fra+eng` for mixed documents. A missing pack is offered for
+    install.
+-   **Use `--clean` on poor scans**: crooked pages, phone photos, shadows near
+    the spine, grey or noisy backgrounds. It changes how the output looks, so
+    leave it off for scans that are already clean, and it cannot be combined
+    with `--preserve`, because a straightened page no longer lines up with the
+    original.
+-   **Raise the DPI for small print.** 300 suits most documents; try 400 for
+    footnotes or dense tables.
+-   **Try the `tessdata_best` models** if accuracy still falls short. Download
+    the `.traineddata` files you need into one directory and pass it with
+    `--tessdata-dir`. They are several times slower and not always better, so
+    compare them on your own documents.
+-   **Fall back to `--plain`** if automatic rotation ever misreads a page with
+    very little text on it.
 
 ## Preserve mode
 

@@ -16,6 +16,9 @@
     them.
 -   **Clean mode**: Straighten crooked scans and flatten uneven lighting before
     OCR.
+-   **PaddleOCR engine**: For the hardest scans, recognise with PaddleOCR
+    instead of Tesseract. It is installed on demand and deleted afterwards,
+    unless you choose to keep it.
 -   **Parallel Processing**: Uses multiple cores for faster OCR.
 -   **Text sidecars**: Also write the recognised text as `.txt` or `.md`.
 -   **Interactive mode**: Run it with no arguments and it asks for each setting.
@@ -67,12 +70,15 @@ Ensure you have the following installed:
 -   **poppler**: For `pdftoppm`, `pdfunite`, `pdfinfo` and `pdftotext`.
 -   **qpdf** (optional): Only needed for `--preserve`.
 -   **ImageMagick** (optional): Only needed for `--clean`.
+-   **uv** (optional): Only needed for `--paddle`, to build PaddleOCR's
+    environment.
 
 On macOS (Homebrew):
 ```bash
 brew install tesseract poppler
 brew install qpdf            # optional, for --preserve
 brew install imagemagick     # optional, for --clean
+brew install uv              # optional, for --paddle
 ```
 
 On Ubuntu/Debian:
@@ -80,6 +86,7 @@ On Ubuntu/Debian:
 sudo apt-get install tesseract-ocr poppler-utils
 sudo apt-get install qpdf    # optional, for --preserve
 sudo apt-get install imagemagick  # optional, for --clean
+curl -LsSf https://astral.sh/uv/install.sh | sh  # optional, for --paddle
 ```
 
 ## Usage
@@ -120,6 +127,9 @@ handing back a document that is quietly missing pages.
 | `-p, --preserve` | Keep the original pages, add an invisible text layer on top (needs `qpdf`) | `false` |
 | `-c, --clean` | Straighten pages and flatten shadows before OCR (needs ImageMagick). The cleaned page is what the output shows. Not with `--preserve` | `false` |
 | `--plain` | Skip automatic rotation and adaptive thresholding (the pre-1.4 behaviour) | `false` |
+| `--paddle` | Recognise with PaddleOCR instead of Tesseract (needs `uv`). See [PaddleOCR engine](#paddleocr-engine) | `false` |
+| `--paddle-model <size>` | PaddleOCR model: `tiny`, `small` or `medium` | `small` |
+| `--save-paddle` | Keep the PaddleOCR install in `~/.cache/copyable-pdf/paddle` and reuse it | `false` |
 | `--tessdata-dir <path>` | Read language models from this directory, e.g. a [`tessdata_best`](https://github.com/tesseract-ocr/tessdata_best) checkout | system tessdata |
 | `-k, --keep` | Keep temporary files (debug) | `false` |
 | `-v, --verbose` | Verbose output | `false` |
@@ -171,6 +181,37 @@ copyable-pdf --clean -l fra photo.pdf
     compare them on your own documents.
 -   **Fall back to `--plain`** if automatic rotation ever misreads a page with
     very little text on it.
+-   **Switch to `--paddle`** when Tesseract still misses text: phone photos,
+    faded or noisy scans, unusual fonts.
+
+## PaddleOCR engine
+
+`--paddle` recognises the pages with [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)
+instead of Tesseract. Its neural models read poor scans and photos that
+Tesseract misses: on a crooked, blurred and noisy test page, Tesseract finds
+nothing and PaddleOCR reads every line.
+
+```bash
+copyable-pdf --paddle scan.pdf                 # install, OCR, delete the install
+copyable-pdf --save-paddle -l spa scan.pdf     # keep it for next time
+```
+
+-   **Nothing to install by hand except `uv`.** The first run downloads
+    PaddleOCR, a compatible Python and the models, about 1 GB, in about a
+    minute. A spinner shows progress while it does.
+-   **Temporary by default.** Everything goes into the run's temporary
+    directory and is deleted when the run ends.
+-   **`--save-paddle` keeps it** in `~/.cache/copyable-pdf/paddle`. Every
+    later `--paddle` run reuses it and starts in seconds. Delete that folder to
+    remove it.
+-   **Slower than Tesseract**: a few seconds per page with the default `small`
+    model. `--paddle-model tiny` is faster, and `medium` is more accurate but
+    several times slower.
+-   **Languages**: the same `-l` codes as Tesseract. Latin-script languages,
+    English, Chinese and Japanese share one model, so `-l fra+eng` works. Other
+    scripts (Cyrillic, Arabic, Korean…) take one language at a time.
+-   Works with `--preserve`, `--clean`, `-t` and `-m`. `--plain` and
+    `--tessdata-dir` are Tesseract settings and are ignored.
 
 ## Preserve mode
 

@@ -33,6 +33,10 @@ jobs:
           # ImageMagick 7 renamed the tool; `convert` is a deprecated shim there.
           echo "CONVERT=magick" >> "$GITHUB_ENV"
 
+      # --paddle builds its Python environment with uv.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
       - name: Lint
         run: shellcheck -S warning script.sh
 
@@ -261,6 +265,32 @@ jobs:
           pdftotext models.pdf - | grep -q "Hello World" || { echo "❌ no OCR text"; exit 1; }
           echo "✅ bare model directory works"
 
+      # --- PaddleOCR. The tiny model keeps the runs short; the install is the
+      # same whatever the size. ---
+
+      - name: --paddle reads what Tesseract cannot, and leaves nothing behind
+        run: |
+          # noisy.pdf without --clean: Tesseract returns nothing (checked above).
+          ./script.sh --paddle --paddle-model tiny -o noisy_paddle.pdf noisy.pdf
+          pdftotext noisy_paddle.pdf - | grep -q "black quartz" || { echo "❌ no text"; pdftotext noisy_paddle.pdf -; exit 1; }
+          # Installed into the run's temp dir by default, so no trace may remain.
+          test ! -e "$HOME/.cache/copyable-pdf" || { echo "❌ left an install in ~/.cache"; exit 1; }
+          echo "✅ PaddleOCR read the noisy page and cleaned up after itself"
+
+      - name: --save-paddle keeps the install, and later runs reuse it
+        run: |
+          ./script.sh --save-paddle --paddle-model tiny -o saved.pdf input.pdf
+          test -x "$HOME/.cache/copyable-pdf/paddle/venv/bin/python" || { echo "❌ nothing saved"; exit 1; }
+          ./script.sh --paddle --paddle-model tiny -p -o paddle_kept.pdf r180.pdf > reuse.log
+          grep -q "Using PaddleOCR from" reuse.log || { echo "❌ reinstalled instead of reusing"; cat reuse.log; exit 1; }
+          # --preserve: the original page survives and the text lands on it,
+          # upside down as it is, in reading order.
+          pdftotext paddle_kept.pdf - | head -n 1 | grep -q "quick brown fox" || { echo "❌ wrong text or order"; pdftotext paddle_kept.pdf -; exit 1; }
+          w_in=$(pdfimages -list r180.pdf | awk 'NR==3{print $4}')
+          w_kept=$(pdfimages -list paddle_kept.pdf | awk 'NR==3{print $4}')
+          [ "$w_kept" = "$w_in" ] || { echo "❌ preserve re-rendered the page"; exit 1; }
+          echo "✅ saved install reused; --preserve with PaddleOCR works"
+
       - name: More than 100 pages goes through the chunked merge
         run: |
           # pdfunite is called in slices of 100 above that count, to stay under
@@ -291,6 +321,8 @@ jobs:
           ./script.sh -o x.pdf notpdf.pdf;             [ $? -eq 2 ] || { echo "❌ input is not a PDF"; exit 1; }
           ./script.sh -c -p -o x.pdf input.pdf;        [ $? -eq 2 ] || { echo "❌ --clean with --preserve"; exit 1; }
           ./script.sh --tessdata-dir nope -o x.pdf input.pdf; [ $? -eq 2 ] || { echo "❌ missing tessdata dir"; exit 1; }
+          ./script.sh --paddle-model huge -o x.pdf input.pdf; [ $? -eq 2 ] || { echo "❌ bad paddle model"; exit 1; }
+          ./script.sh --paddle -l kli -o x.pdf input.pdf;  [ $? -eq 2 ] || { echo "❌ language paddle lacks"; exit 1; }
           set -e
           test ! -e x.pdf
           # The source must still be the source, not a rasterised copy of itself.

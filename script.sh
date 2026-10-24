@@ -20,6 +20,13 @@ PRESERVE=false
 CLEAN=false
 PLAIN=false
 TESSDATA_DIR=""
+PADDLE=false
+PADDLE_MODEL="small"
+SAVE_PADDLE=false
+# Pinned: the helper below relies on this PaddleOCR's result fields, and a pin
+# change is what makes a saved install get rebuilt.
+PADDLE_PACKAGES=(paddlepaddle==3.3.1 paddleocr==3.7.0)
+PADDLE_SAVED_HOME="${XDG_CACHE_HOME:-$HOME/.cache}/copyable-pdf/paddle"
 
 # --- Colors ---
 if [ -t 1 ] && [ "$COLOR_SUPPORT" = true ]; then
@@ -74,6 +81,39 @@ draw_progress_bar() {
 # A redrawn bar is meaningless once stdout is a file: piping a run to a log or
 # to CI used to bury the output under hundreds of \r-joined bar frames on one
 # unreadable line. Off a terminal, report a plain line now and then instead.
+# A spinner for the steps that give no progress of their own: installing
+# PaddleOCR, loading its models, cleaning pages. Off a terminal, one log line.
+SPINNER_PID=""
+spinner_start() {
+    local msg="$1"
+    if [ ! -t 1 ]; then
+        log_info "$msg..."
+        return
+    fi
+    (
+        local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+        local i=0 start=$SECONDS
+        while :; do
+            printf "\r${BLUE}%s${NC} %s (%ds)" "${frames[i % ${#frames[@]}]}" "$msg" "$((SECONDS - start))"
+            i=$((i + 1))
+            sleep 0.1
+        done
+    ) &
+    SPINNER_PID=$!
+}
+
+# Safe to call when no spinner runs. Clears the line only if it stopped one,
+# so a progress bar drawn since is left alone.
+spinner_stop() {
+    if [ -n "$SPINNER_PID" ]; then
+        if kill "$SPINNER_PID" 2>/dev/null; then
+            wait "$SPINNER_PID" 2>/dev/null || true
+            printf "\r\033[K"
+        fi
+        SPINNER_PID=""
+    fi
+}
+
 report_progress() {
     local current="$1"
     local total="$2"
@@ -122,6 +162,15 @@ print_usage() {
     echo "      --tessdata-dir <path>"
     echo "                       Read language models from this directory"
     echo "                       (e.g. a tessdata_best checkout)"
+    echo "      --paddle         Recognise with PaddleOCR instead of Tesseract:"
+    echo "                       better on poor scans and photos, slower. Installed"
+    echo "                       on first use into the temp dir (needs uv, ~1 GB)"
+    echo "                       and deleted after the run, unless --save-paddle"
+    echo "      --paddle-model <tiny|small|medium>"
+    echo "                       Model size: faster or more accurate (default: small)"
+    echo "      --save-paddle    Keep the PaddleOCR install in"
+    echo "                       ~/.cache/copyable-pdf/paddle and reuse it on every"
+    echo "                       later --paddle run (delete that folder to remove it)"
     echo "  -k, --keep           Keep temporary files (debug mode)"
     echo "  -v, --verbose        Verbose output"
     echo "  -h, --help           Show this help message"
@@ -133,6 +182,7 @@ print_usage() {
     echo "  copyable-pdf --jobs 8 -k document.pdf"
     echo "  copyable-pdf --preserve scan.pdf"
     echo "  copyable-pdf --clean -l fra photo-of-a-page.pdf"
+    echo "  copyable-pdf --paddle --save-paddle -l spa poor-scan.pdf"
 }
 
 ask_yes_no() {
@@ -253,6 +303,326 @@ require_language() {
     done
 }
 
+# Tesseract language code -> PaddleOCR's, or nothing when Paddle has no model.
+paddle_lang_code() {
+    case "$1" in
+        eng) echo en ;;        fra) echo fr ;;        spa) echo es ;;
+        deu) echo de ;;        ita) echo it ;;        por) echo pt ;;
+        nld) echo nl ;;        pol) echo pl ;;        ces) echo cs ;;
+        dan) echo da ;;        swe) echo sv ;;        nor) echo no ;;
+        fin) echo "fi" ;;        ron) echo ro ;;        hun) echo hu ;;
+        tur) echo tr ;;        cat) echo ca ;;        hrv) echo hr ;;
+        slk) echo sk ;;        slv) echo sl ;;        lit) echo lt ;;
+        lav) echo lv ;;        est) echo et ;;        ind) echo id ;;
+        msa) echo ms ;;        vie) echo vi ;;        lat) echo la ;;
+        gle) echo ga ;;        cym) echo cy ;;        afr) echo af ;;
+        isl) echo is ;;        sqi) echo sq ;;        eus) echo eu ;;
+        glg) echo gl ;;        mlt) echo mt ;;        bos) echo bs ;;
+        aze) echo az ;;        uzb) echo uz ;;        swa) echo sw ;;
+        tgl) echo tl ;;        oci) echo oc ;;        ltz) echo lb ;;
+        chi_sim) echo ch ;;    chi_tra) echo chinese_cht ;;
+        jpn) echo japan ;;     kor) echo korean ;;
+        rus) echo ru ;;        ukr) echo uk ;;        bel) echo be ;;
+        bul) echo bg ;;        mkd) echo mk ;;        srp) echo rs_cyrillic ;;
+        kaz) echo kk ;;        mon) echo mn ;;
+        ara) echo ar ;;        fas) echo fa ;;        urd) echo ur ;;
+        hin) echo hi ;;        mar) echo mr ;;        nep) echo ne ;;
+        tha) echo th ;;        ell) echo el ;;        tam) echo ta ;;
+        tel) echo te ;;        kat) echo ka ;;
+    esac
+}
+
+# Install PaddleOCR (or find it installed) and set PADDLE_PY. Everything lives
+# under one directory — the interpreter uv fetches, the packages, the models —
+# so deleting it removes every trace: the run's temp dir by default, or the
+# saved folder, which is reused whenever it exists.
+setup_paddle() {
+    local home where
+    if [ "$SAVE_PADDLE" = true ] || [ -d "$PADDLE_SAVED_HOME/venv" ]; then
+        home="$PADDLE_SAVED_HOME"
+        where="$home"
+    else
+        home="$TEMP_DIR/paddle"
+        where="a temporary folder, deleted after the run"
+    fi
+    export UV_PYTHON_INSTALL_DIR="$home/python" UV_NO_CACHE=1 UV_NO_PROGRESS=1
+    export PADDLE_PDX_CACHE_HOME="$home/models" PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+    PADDLE_PY="$home/venv/bin/python"
+
+    local marker
+    marker="$home/venv/.copyable-pdf-$(echo "${PADDLE_PACKAGES[*]}" | tr ' =' '_-')"
+    if [ -x "$PADDLE_PY" ] && [ -f "$marker" ]; then
+        log_info "Using PaddleOCR from $home"
+        return
+    fi
+
+    rm -rf "$home/venv"
+    mkdir -p "$home"
+    # PaddlePaddle ships wheels for Python 3.9-3.13 only, so ask uv for 3.12
+    # whatever the system Python is; uv downloads one if it has to.
+    spinner_start "Installing PaddleOCR into $where (~1 GB, about a minute)"
+    if ! { uv venv -q --python 3.12 "$home/venv" &&
+           uv pip install -q --python "$PADDLE_PY" "${PADDLE_PACKAGES[@]}"; } \
+            >"$TEMP_DIR/paddle-install.log" 2>&1; then
+        spinner_stop
+        log_error "Could not install PaddleOCR:"
+        tail -n 5 "$TEMP_DIR/paddle-install.log" | while read -r l; do log_error "  $l"; done
+        rm -rf "$home/venv"
+        exit 1
+    fi
+    touch "$marker"
+    spinner_stop
+    log_success "PaddleOCR installed in $where."
+}
+
+# The PaddleOCR side, written out at run time: copyable-pdf installs as a
+# single file, so the helper travels inside it.
+write_paddle_helper() {
+    cat > "$1" <<'PADDLE_HELPER_EOF'
+"""Recognise page images with PaddleOCR and write one PDF per page.
+
+Each page-N.png becomes page-N.pdf, built the way tesseract builds its own:
+the page image (unless --textonly) under an invisible text layer in a
+glyphless CID font, so the rest of copyable-pdf merges and stamps the result
+exactly as it does tesseract's. On stdout, one line per page: DONE, or
+FAIL <name> with the reason in page-N.err. READY once the models are loaded.
+Everything PaddleOCR prints goes to stderr, so stdout carries only that.
+"""
+import argparse
+import contextlib
+import math
+import os
+import sys
+import zlib
+
+# Languages the PP-OCRv6 models read, all with the same multilingual model.
+V6_LANGS = {"ch", "chinese_cht", "en", "japan"}
+
+
+def v6_langs():
+    try:
+        from paddleocr._utils.langs import LATIN_LANGS
+    except ImportError:
+        LATIN_LANGS = {"fr", "es", "de", "it", "pt", "nl", "pl", "cs", "da",
+                       "sv", "no", "fi", "ro", "hu", "tr", "ca", "hr", "sk",
+                       "sl", "lt", "lv", "et", "id", "ms", "vi", "la", "ga",
+                       "cy", "af", "is", "sq"}
+    return V6_LANGS | (set(LATIN_LANGS) - {"pi"})
+
+
+def load_ocr(langs, model):
+    from paddleocr import PaddleOCR
+
+    # Page-level orientation is left to the text lines: the page classifier
+    # turned an upright page with a shadow upside down, and it reports boxes in
+    # the rotated frame. Text-line orientation reads upside-down lines just as
+    # well, in the page's own coordinates, which --preserve needs.
+    common = dict(
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
+        use_textline_orientation=True,
+    )
+    if all(lang in v6_langs() for lang in langs):
+        return PaddleOCR(
+            text_detection_model_name=f"PP-OCRv6_{model}_det",
+            text_recognition_model_name=f"PP-OCRv6_{model}_rec",
+            **common,
+        )
+    # Other scripts have one model per language, so a mix cannot be honoured.
+    if len(langs) > 1:
+        print(f"PaddleOCR reads one script at a time; using '{langs[0]}'.",
+              file=sys.stderr)
+    return PaddleOCR(lang=langs[0], **common)
+
+
+def tounicode_cmap():
+    # Identity: every 2-byte code is that UTF-16 code unit. bfrange blocks may
+    # not cross a high byte, and a block holds at most 100 entries.
+    ranges = [b"<%02X00> <%02XFF> <%02X00>" % (h, h, h) for h in range(256)]
+    blocks = []
+    for i in range(0, len(ranges), 100):
+        chunk = ranges[i:i + 100]
+        blocks.append(b"%d beginbfrange\n%s\nendbfrange" % (len(chunk), b"\n".join(chunk)))
+    return (
+        b"/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n"
+        b"/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n"
+        b"/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n"
+        b"1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n"
+        + b"\n".join(blocks)
+        + b"\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n"
+    )
+
+
+def stream(entries, data, compress=True):
+    if compress:
+        data = zlib.compress(data)
+        entries += b" /Filter /FlateDecode"
+    return b"<< %s /Length %d >>\nstream\n%s\nendstream" % (entries, len(data), data)
+
+
+def write_page(img_path, out_path, lines, dpi, textonly, font):
+    from PIL import Image
+
+    im = Image.open(img_path)
+    w_px, h_px = im.size
+    scale = 72.0 / dpi
+    pw, ph = w_px * scale, h_px * scale
+
+    ops = []
+    if not textonly:
+        ops.append(b"q %.2f 0 0 %.2f 0 0 cm /Im0 Do Q" % (pw, ph))
+    ops.append(b"BT 3 Tr")
+    for text, poly, flipped in lines:
+        if not text:
+            continue
+        # The polygon runs top-left, top-right, bottom-right, bottom-left in
+        # image pixels (y down). Convert to PDF points (y up).
+        tl, tr, br, bl = [(x * scale, ph - y * scale) for x, y in poly]
+        # Upside-down line: it reads from the image's top-right corner leftwards,
+        # with its baseline along the top edge.
+        origin, end, top = (tr, tl, br) if flipped else (bl, br, tl)
+        dx, dy = end[0] - origin[0], end[1] - origin[1]
+        length = math.hypot(dx, dy)
+        size = math.hypot(top[0] - origin[0], top[1] - origin[1])
+        if length < 1 or size < 1:
+            continue
+        # A line a few degrees off square is a crooked scan, not rotated text.
+        # Laid along its true slope, text extractors split it mid-word ("f ox"),
+        # so square it up, pivoting on the middle of its baseline.
+        theta = math.atan2(dy, dx)
+        square = round(theta / (math.pi / 2)) * (math.pi / 2)
+        if abs(theta - square) < math.radians(15):
+            mid = ((origin[0] + end[0]) / 2, (origin[1] + end[1]) / 2)
+            theta = square
+            origin = (mid[0] - length / 2 * math.cos(theta),
+                      mid[1] - length / 2 * math.sin(theta))
+        cos, sin = math.cos(theta), math.sin(theta)
+        # The glyphless font is 500 units wide per character; stretch the line
+        # so it spans the box the text was found in.
+        tz = 100.0 * length / (len(text) * 0.5 * size)
+        hexed = text.encode("utf-16-be").hex().upper().encode()
+        ops.append(b"%.4f %.4f %.4f %.4f %.2f %.2f Tm /F0 %.2f Tf %.2f Tz <%s> Tj"
+                   % (cos, sin, -sin, cos, origin[0], origin[1], size, tz, hexed))
+    ops.append(b"ET")
+
+    objs = {}
+    objs[1] = b"<< /Type /Catalog /Pages 2 0 R >>"
+    objs[2] = b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"
+    xobj = b"" if textonly else b" /XObject << /Im0 11 0 R >>"
+    objs[3] = (b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %.2f %.2f]"
+               b" /Resources << /Font << /F0 5 0 R >>%s >> /Contents 4 0 R >>"
+               % (pw, ph, xobj))
+    objs[4] = stream(b"", b"\n".join(ops))
+    objs[5] = (b"<< /Type /Font /Subtype /Type0 /BaseFont /GlyphLessFont"
+               b" /Encoding /Identity-H /DescendantFonts [6 0 R] /ToUnicode 8 0 R >>")
+    c2g = b"9 0 R" if font else b"/Identity"
+    objs[6] = (b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /GlyphLessFont"
+               b" /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>"
+               b" /FontDescriptor 7 0 R /DW 500 /CIDToGIDMap %s >>" % c2g)
+    ff = b" /FontFile2 10 0 R" if font else b""
+    objs[7] = (b"<< /Type /FontDescriptor /FontName /GlyphLessFont /Flags 5"
+               b" /FontBBox [0 0 500 1000] /ItalicAngle 0 /Ascent 1000 /Descent 0"
+               b" /CapHeight 1000 /StemV 80%s >>" % ff)
+    objs[8] = stream(b"", tounicode_cmap())
+    if font:
+        # Every character maps to glyph 1, the font's one (empty) glyph.
+        objs[9] = stream(b"", b"\x00\x01" * 65536)
+        objs[10] = stream(b"/Length1 %d" % len(font), font)
+    if not textonly:
+        if im.mode not in ("L", "RGB"):
+            im = im.convert("L" if im.mode in ("1", "LA", "I;16") else "RGB")
+        space = b"/DeviceGray" if im.mode == "L" else b"/DeviceRGB"
+        objs[11] = stream(
+            b"/Type /XObject /Subtype /Image /Width %d /Height %d"
+            b" /ColorSpace %s /BitsPerComponent 8" % (w_px, h_px, space),
+            im.tobytes(),
+        )
+
+    out = bytearray(b"%PDF-1.5\n%\xe2\xe3\xcf\xd3\n")
+    size = max(objs) + 1
+    offsets = [0] * size
+    for num in range(1, size):
+        if num in objs:
+            offsets[num] = len(out)
+            out += b"%d 0 obj\n%s\nendobj\n" % (num, objs[num])
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % size
+    for num in range(1, size):
+        if num in objs:
+            out += b"%010d 00000 n \n" % offsets[num]
+        else:
+            out += b"0000000000 65535 f \n"
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (size, xref)
+    with open(out_path, "wb") as f:
+        f.write(out)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--lang", required=True, help="PaddleOCR codes, comma separated")
+    ap.add_argument("--model", default="small")
+    ap.add_argument("--dpi", type=float, required=True)
+    ap.add_argument("--textonly", action="store_true")
+    ap.add_argument("--font", default="")
+    ap.add_argument("images", nargs="+")
+    args = ap.parse_args()
+
+    out = sys.stdout
+    font = b""
+    if args.font and os.path.isfile(args.font):
+        with open(args.font, "rb") as f:
+            font = f.read()
+
+    def report(line):
+        print(line, file=out, flush=True)
+
+    def fail(img, reason):
+        base = os.path.splitext(img)[0]
+        with open(base + ".err", "w") as f:
+            f.write(reason + "\n")
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(base + ".pdf")
+        report("FAIL " + os.path.basename(img))
+
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            ocr = load_ocr(args.lang.split(","), args.model)
+    except Exception as exc:  # no network, bad model name, broken install...
+        for img in args.images:
+            fail(img, f"PaddleOCR could not start: {type(exc).__name__}: {exc}")
+        return 1
+    report("READY")
+
+    status = 0
+    for img in args.images:
+        try:
+            with contextlib.redirect_stdout(sys.stderr):
+                res = ocr.predict(img)[0]
+            # Orientation is reported per detected line, recognised or not, so
+            # match it back to the recognised lines by their polygon.
+            angle_of = {
+                tuple(map(tuple, poly.tolist())): angle
+                for poly, angle in zip(res["dt_polys"],
+                                       res.get("textline_orientation_angles", []))
+            }
+            lines = []
+            for text, poly in zip(res["rec_texts"], res["rec_polys"]):
+                points = [tuple(p) for p in poly.tolist()]
+                lines.append((str(text), points, angle_of.get(tuple(points)) == 1))
+            write_page(img, os.path.splitext(img)[0] + ".pdf", lines,
+                       args.dpi, args.textonly, font)
+            report("DONE")
+        except Exception as exc:
+            fail(img, f"{type(exc).__name__}: {exc}")
+            status = 1
+    return status
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+PADDLE_HELPER_EOF
+}
+
 # --- Main Logic ---
 
 # Fail with a usable message when an option that takes a value was given none.
@@ -329,6 +699,22 @@ while [[ $# -gt 0 ]]; do
             require_value "$key" "$#"
             TESSDATA_DIR="$2"
             shift; shift
+            ;;
+        --paddle)
+            PADDLE=true
+            shift
+            ;;
+        # Both only mean something with PaddleOCR, so either one asks for it.
+        --paddle-model)
+            require_value "$key" "$#"
+            PADDLE=true
+            PADDLE_MODEL="$2"
+            shift; shift
+            ;;
+        --save-paddle)
+            PADDLE=true
+            SAVE_PADDLE=true
+            shift
             ;;
         -k|--keep)
             KEEP_TEMP=true
@@ -447,6 +833,28 @@ if [ -n "$TESSDATA_DIR" ] && [ ! -d "$TESSDATA_DIR" ]; then
     exit 2
 fi
 
+# PaddleOCR names languages its own way; translate now, so an unsupported one
+# fails here rather than after a 1 GB install.
+PADDLE_LANGS=""
+if [ "$PADDLE" = true ]; then
+    case "$PADDLE_MODEL" in
+        tiny|small|medium) ;;
+        *) log_error "--paddle-model must be tiny, small or medium (got '$PADDLE_MODEL')."; exit 2 ;;
+    esac
+    IFS='+' read -ra TESS_LANGS <<< "$OCR_LANG"
+    for lang in "${TESS_LANGS[@]}"; do
+        code="$(paddle_lang_code "$lang")"
+        if [ -z "$code" ]; then
+            log_error "PaddleOCR has no model for language '$lang'. Drop --paddle to use Tesseract."
+            exit 2
+        fi
+        PADDLE_LANGS="${PADDLE_LANGS:+$PADDLE_LANGS,}$code"
+    done
+    if [ "$PLAIN" = true ] || [ -n "$TESSDATA_DIR" ]; then
+        log_warn "--plain and --tessdata-dir are Tesseract settings; --paddle ignores them."
+    fi
+fi
+
 if [ -n "$JOBS" ]; then
     case "$JOBS" in
         ''|*[!0-9]*) log_error "Jobs must be a positive integer (got '$JOBS')."; exit 2 ;;
@@ -478,6 +886,11 @@ if [ "$VERBOSE" = true ]; then
     echo "  Preserve:  $PRESERVE"
     echo "  Clean:     $CLEAN"
     echo "  Plain:     $PLAIN"
+    if [ "$PADDLE" = true ]; then
+        echo "  Engine:    PaddleOCR ($PADDLE_MODEL, $PADDLE_LANGS)"
+    else
+        echo "  Engine:    Tesseract"
+    fi
     if [ -n "$TESSDATA_DIR" ]; then
         echo "  Tessdata:  $TESSDATA_DIR"
     fi
@@ -486,10 +899,15 @@ fi
 
 # 4. Dependency Checks
 log_info "Checking dependencies..."
-require_command tesseract tesseract
+# --paddle needs no tesseract at all: only uv, to build PaddleOCR's environment.
+if [ "$PADDLE" = true ]; then
+    require_command uv uv
+else
+    require_command tesseract tesseract
+    require_language "$OCR_LANG"
+fi
 require_command pdftoppm poppler
 require_command pdftotext poppler
-require_language "$OCR_LANG"
 
 # Check PDF merge tool
 if ! command -v pdfunite >/dev/null 2>&1; then
@@ -523,7 +941,7 @@ fi
 # --tessdata-dir may not have it.
 PSM=3
 THRESHOLD_METHOD=""
-if [ "$PLAIN" = false ]; then
+if [ "$PLAIN" = false ] && [ "$PADDLE" = false ]; then
     if has_tess_lang osd; then
         PSM=1
     else
@@ -574,10 +992,21 @@ fi
 # 5. Execution
 
 TEMP_DIR=$(mktemp -d)
-if [ "$KEEP_TEMP" = false ]; then
-    trap 'rm -rf "$TEMP_DIR"' EXIT
-else
+# A spinner left running would keep drawing over the terminal after the script
+# has exited, so it is stopped on every way out.
+cleanup() {
+    spinner_stop
+    if [ "$KEEP_TEMP" = false ]; then
+        rm -rf "$TEMP_DIR"
+    fi
+}
+trap cleanup EXIT
+if [ "$KEEP_TEMP" = true ]; then
     log_info "Temporary files will be kept at: $TEMP_DIR"
+fi
+
+if [ "$PADDLE" = true ]; then
+    setup_paddle
 fi
 
 log_info "Step 1/3: Converting PDF to images ($DPI DPI)..."
@@ -596,7 +1025,11 @@ if [ -n "$PDF_PAGES" ] && [ "$PAGE_COUNT" -ne "$PDF_PAGES" ]; then
 fi
 log_success "Generated $PAGE_COUNT pages."
 
-log_info "Step 2/3: OCR Processing ($OCR_LANG) with $JOBS jobs..."
+if [ "$PADDLE" = true ]; then
+    log_info "Step 2/3: OCR Processing ($OCR_LANG) with PaddleOCR..."
+else
+    log_info "Step 2/3: OCR Processing ($OCR_LANG) with $JOBS jobs..."
+fi
 
 # Export vars for xargs
 export LANG_CODE="$OCR_LANG"
@@ -611,6 +1044,29 @@ if [ "$JOBS" -gt 1 ]; then
     export OMP_THREAD_LIMIT=1 MAGICK_THREAD_LIMIT=1
 fi
 
+# Straighten the page, then divide out uneven lighting: the page over a
+# heavily blurred copy of itself is 1 (white) wherever there is only
+# background, shadow or not, while text stays dark. No -normalize after it:
+# stretching the contrast turns scanner noise in the margins into specks
+# that the OCR reads as junk lines. Done in place: the cleaned image is
+# both what gets recognised and what the output page shows.
+# The blur runs on a 1/10 thumbnail scaled back to the page's exact size: the
+# same lighting map, but in 2 s a page instead of 12.
+clean_page() {
+    local img="$1"
+    local base="${img%.*}"
+    if ! "$IM" "$img" -background white -deskew 40% +repage \
+            -set option:pagesize '%wx%h' \
+            \( +clone -scale 10% -blur 0x2.5 -resize '%[pagesize]!' \) \
+            -compose Divide_Src -composite \
+            "$img" 2>"$base.err"; then
+        echo "FAIL $(basename "$img")"
+        return 1
+    fi
+    rm -f "$base.err"
+}
+export -f clean_page
+
 process_page_worker() {
     local img="$1"
     local base="${img%.*}" # remove extension
@@ -621,19 +1077,8 @@ process_page_worker() {
         echo "Processing $name..." >&2
     fi
 
-    # Straighten the page, then divide out uneven lighting: the page over a
-    # heavily blurred copy of itself is 1 (white) wherever there is only
-    # background, shadow or not, while text stays dark. No -normalize after it:
-    # stretching the contrast turns scanner noise in the margins into specks
-    # that tesseract reads as junk lines. Done in place: the cleaned image is
-    # both what tesseract reads and what the output page shows.
     if [ "$CLEAN" = true ]; then
-        if ! "$IM" "$img" -background white -deskew 40% +repage \
-                \( +clone -blur 0x25 \) -compose Divide_Src -composite \
-                "$img" 2>"$base.err"; then
-            echo "FAIL $name"
-            return 1
-        fi
+        clean_page "$img" || return 1
     fi
 
     # tesseract input output -l lang pdf. Its exit status decides what we report:
@@ -680,16 +1125,12 @@ process_page_worker() {
 }
 export -f process_page_worker
 
-# Run parallel OCR and update progress bar
-counter=0
-# We pipe the output of xargs (which prints DONE lines) to our loop.
-# `|| true` on the pipeline: a worker that fails makes xargs exit 123, and under
-# `pipefail` that would abort the script right here — before the counting check
-# below could name the pages that failed. Let the check decide, so the user gets
-# a readable error instead of a bare exit code.
-find "$TEMP_DIR" -name "page-*.png" -print0 | \
-    xargs -0 -P "$JOBS" -I {} bash -c 'process_page_worker "$@"' _ {} | \
+# Turn the workers' DONE / FAIL lines into the progress bar. The first line of
+# any kind also ends the spinner that covers PaddleOCR's model loading.
+track_progress() {
+    local line counter=0
     while read -r line; do
+        spinner_stop
         case "$line" in
             DONE)
                 counter=$((counter + 1))
@@ -701,7 +1142,56 @@ find "$TEMP_DIR" -name "page-*.png" -print0 | \
                 log_error "OCR failed on ${line#FAIL }"
                 ;;
         esac
-    done || true
+    done
+}
+
+# `|| true` on each pipeline: a worker that fails makes it exit non-zero, and
+# under `pipefail` that would abort the script right here — before the counting
+# check below could name the pages that failed. Let the check decide, so the
+# user gets a readable error instead of a bare exit code.
+if [ "$PADDLE" = true ]; then
+    # Cleaning stays parallel; recognition is one process, because each one
+    # would load its own copy of the models, and PaddleOCR already uses every
+    # core for a page.
+    if [ "$CLEAN" = true ]; then
+        spinner_start "Cleaning pages"
+        find "$TEMP_DIR" -name "page-*.png" -print0 | \
+            xargs -0 -P "$JOBS" -I {} bash -c 'clean_page "$@"' _ {} >/dev/null || true
+        spinner_stop
+    fi
+    shopt -s nullglob
+    CLEAN_ERRS=("$TEMP_DIR"/page-*.err)
+    shopt -u nullglob
+    if [ "${#CLEAN_ERRS[@]}" -gt 0 ]; then
+        for err in "${CLEAN_ERRS[@]}"; do
+            log_error "Cleaning failed on $(basename "$err" .err).png: $(tr '\n' ' ' < "$err" | cut -c1-200)"
+        done
+        exit 1
+    fi
+
+    PADDLE_HELPER="$TEMP_DIR/paddle_ocr.py"
+    write_paddle_helper "$PADDLE_HELPER"
+    paddle_args=(--lang "$PADDLE_LANGS" --model "$PADDLE_MODEL" --dpi "$DPI")
+    if [ "$PRESERVE" = true ]; then
+        paddle_args+=(--textonly)
+    fi
+    # The invisible text is set in tesseract's glyphless font when it is
+    # around; without it the font is simply not embedded.
+    if command -v tesseract >/dev/null 2>&1; then
+        TESS_DATA="$(tesseract --list-langs 2>&1 | sed -n 's/.*"\(.*\)".*/\1/p' | head -n 1)"
+        if [ -f "${TESS_DATA%/}/pdf.ttf" ]; then
+            paddle_args+=(--font "${TESS_DATA%/}/pdf.ttf")
+        fi
+    fi
+    spinner_start "Loading PaddleOCR models ($PADDLE_MODEL)"
+    "$PADDLE_PY" -W ignore "$PADDLE_HELPER" "${paddle_args[@]}" "${PAGE_IMAGES[@]}" \
+        2>"$TEMP_DIR/paddle.log" | track_progress || true
+    spinner_stop
+else
+    find "$TEMP_DIR" -name "page-*.png" -print0 | \
+        xargs -0 -P "$JOBS" -I {} bash -c 'process_page_worker "$@"' _ {} | \
+        track_progress || true
+fi
 
 # Close the progress bar's line — but only if one was actually drawn.
 if [ -t 1 ] && [ "$VERBOSE" = false ]; then
@@ -733,6 +1223,12 @@ if [ "$PAGE_COUNT_PDF" -ne "$PAGE_COUNT" ]; then
         err_base="$(basename "$err" .err)"
         log_error "  $err_base.png: $(tr '\n' ' ' < "$err" | cut -c1-200)"
     done
+    # A PaddleOCR process that died outright (out of memory, a crash in native
+    # code) leaves no per-page reason, only its own log.
+    if [ "$PADDLE" = true ] && [ "${#ERR_LIST[@]}" -eq 0 ] && [ -s "$TEMP_DIR/paddle.log" ]; then
+        log_error "  PaddleOCR stopped; last lines of its log:"
+        tail -n 5 "$TEMP_DIR/paddle.log" | while read -r l; do log_error "    $l"; done
+    fi
     exit 1
 fi
 

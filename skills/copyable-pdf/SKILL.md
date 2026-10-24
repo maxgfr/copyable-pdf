@@ -25,7 +25,8 @@ searchable PDF. It can also write the recognised text beside it.
    - a language other than English: `brew install tesseract-lang`, or
      `apt-get install tesseract-ocr-<code>` (e.g. `tesseract-ocr-fra`);
    - `--preserve`: `qpdf`;
-   - `--clean`: `imagemagick`.
+   - `--clean`: `imagemagick`;
+   - `--paddle`: `uv` (PaddleOCR itself installs on its own).
 
 ## Running
 
@@ -44,6 +45,8 @@ Pick the options from the document and the request:
 | The original must stay untouched (archives, signed or legal documents, anything kept long-term) | `-p` / `--preserve` |
 | Crooked scan, phone photo, shadows, grey or noisy background | `-c` / `--clean` (not with `--preserve`) |
 | Small print, footnotes, dense tables | `-d 400` |
+| Tesseract still misses text (phone photos, faded or noisy scans) | `--paddle` |
+| `--paddle` will be used again | `--save-paddle` instead (keeps the ~1 GB install) |
 | The user wants the text itself | `-t` (plain text), `-m` (layout kept, written as `.md`) |
 | Custom output path | `-o path/out.pdf` (the directory must exist) |
 
@@ -55,6 +58,11 @@ Pick the options from the document and the request:
   and adds an invisible text layer.
 - `--clean` changes how the pages look in the output: they are straightened
   and their lighting is evened out.
+- `--paddle` downloads about 1 GB on first use (about a minute), into the
+  run's temp dir, deleted afterwards. Tell the user before a first run.
+  `--save-paddle` keeps it in `~/.cache/copyable-pdf/paddle`; later `--paddle`
+  runs reuse it. It is slower per page than Tesseract; `--paddle-model tiny`
+  speeds it up.
 
 ## Results
 

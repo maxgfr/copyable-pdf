@@ -17,6 +17,9 @@ COLOR_SUPPORT=true
 GEN_TEXT=false
 GEN_MD=false
 PRESERVE=false
+CLEAN=false
+PLAIN=false
+TESSDATA_DIR=""
 
 # --- Colors ---
 if [ -t 1 ] && [ "$COLOR_SUPPORT" = true ]; then
@@ -111,6 +114,14 @@ print_usage() {
     echo "  -p, --preserve       Keep the original pages and add an invisible text"
     echo "                       layer on top (needs qpdf) instead of rebuilding"
     echo "                       the PDF from rasterised images"
+    echo "  -c, --clean          Straighten pages and flatten shadows before OCR"
+    echo "                       (needs ImageMagick). The output shows the"
+    echo "                       cleaned pages. Not with --preserve"
+    echo "      --plain          Skip automatic rotation and adaptive"
+    echo "                       thresholding (the pre-1.4 behaviour)"
+    echo "      --tessdata-dir <path>"
+    echo "                       Read language models from this directory"
+    echo "                       (e.g. a tessdata_best checkout)"
     echo "  -k, --keep           Keep temporary files (debug mode)"
     echo "  -v, --verbose        Verbose output"
     echo "  -h, --help           Show this help message"
@@ -121,6 +132,7 @@ print_usage() {
     echo "  copyable-pdf -l fra+eng -t document.pdf"
     echo "  copyable-pdf --jobs 8 -k document.pdf"
     echo "  copyable-pdf --preserve scan.pdf"
+    echo "  copyable-pdf --clean -l fra photo-of-a-page.pdf"
 }
 
 ask_yes_no() {
@@ -195,14 +207,31 @@ require_command() {
     fi
 }
 
+# Is this traineddata available to tesseract? Honours --tessdata-dir, so the
+# check looks where the OCR will actually look.
+has_tess_lang() {
+    local dir_opts=()
+    if [ -n "$TESSDATA_DIR" ]; then
+        dir_opts=(--tessdata-dir "$TESSDATA_DIR")
+    fi
+    tesseract "${dir_opts[@]}" --list-langs 2>/dev/null | grep -qx "$1"
+}
+
 require_language() {
     local langs_arg="$1"
     # Split by '+'
     local IFS='+'
     read -ra LANGS <<< "$langs_arg"
-    
+
     for lang in "${LANGS[@]}"; do
-        if ! tesseract --list-langs 2>/dev/null | grep -qx "$lang"; then
+        if ! has_tess_lang "$lang"; then
+            # A package manager installs into the system tessdata, never into a
+            # directory the user picked, so offering it there would install
+            # something the run still cannot see.
+            if [ -n "$TESSDATA_DIR" ]; then
+                log_error "No '$lang.traineddata' in $TESSDATA_DIR."
+                exit 1
+            fi
             log_warn "Missing Tesseract language data for: $lang"
             local manager
             manager=$(detect_pkg_manager)
@@ -216,7 +245,7 @@ require_language() {
                  fi
             fi
             
-            if ! tesseract --list-langs 2>/dev/null | grep -qx "$lang"; then
+            if ! has_tess_lang "$lang"; then
                 log_error "Language '$lang' still not installed. Exiting."
                 exit 1
             fi
@@ -287,6 +316,19 @@ while [[ $# -gt 0 ]]; do
         -p|--preserve)
             PRESERVE=true
             shift
+            ;;
+        -c|--clean)
+            CLEAN=true
+            shift
+            ;;
+        --plain)
+            PLAIN=true
+            shift
+            ;;
+        --tessdata-dir)
+            require_value "$key" "$#"
+            TESSDATA_DIR="$2"
+            shift; shift
             ;;
         -k|--keep)
             KEEP_TEMP=true
@@ -392,6 +434,19 @@ case "$DPI" in
     0) log_error "DPI must be greater than 0."; exit 2 ;;
 esac
 
+# Cleaning deskews the page, so its text no longer sits where it does on the
+# original — and --preserve stamps the text onto the original. The two would
+# produce a text layer shifted off every line, so refuse rather than ship that.
+if [ "$CLEAN" = true ] && [ "$PRESERVE" = true ]; then
+    log_error "--clean straightens the page, so its text cannot line up with the untouched original that --preserve keeps. Use one or the other."
+    exit 2
+fi
+
+if [ -n "$TESSDATA_DIR" ] && [ ! -d "$TESSDATA_DIR" ]; then
+    log_error "Tessdata directory does not exist: $TESSDATA_DIR"
+    exit 2
+fi
+
 if [ -n "$JOBS" ]; then
     case "$JOBS" in
         ''|*[!0-9]*) log_error "Jobs must be a positive integer (got '$JOBS')."; exit 2 ;;
@@ -421,6 +476,11 @@ if [ "$VERBOSE" = true ]; then
     echo "  Text:      $GEN_TEXT"
     echo "  Markdown:  $GEN_MD"
     echo "  Preserve:  $PRESERVE"
+    echo "  Clean:     $CLEAN"
+    echo "  Plain:     $PLAIN"
+    if [ -n "$TESSDATA_DIR" ]; then
+        echo "  Tessdata:  $TESSDATA_DIR"
+    fi
     echo ""
 fi
 
@@ -441,6 +501,42 @@ require_command pdfinfo poppler
 # tesseract and poppler.
 if [ "$PRESERVE" = true ]; then
     require_command qpdf qpdf
+fi
+
+# ImageMagick 7 ships `magick`; 6 only has `convert`. Only --clean needs either.
+IM=""
+if [ "$CLEAN" = true ]; then
+    if command -v magick >/dev/null 2>&1; then
+        IM="magick"
+    elif command -v convert >/dev/null 2>&1; then
+        IM="convert"
+    else
+        require_command magick imagemagick
+        IM="magick"
+    fi
+fi
+
+# PSM 1 is PSM 3 (fully automatic layout) plus orientation detection. Without
+# it an upside-down page comes back as reversed gibberish, not as an error. The
+# text keeps the coordinates of the image as given, so --preserve stays aligned.
+# It needs osd.traineddata, which every packaged tesseract ships, but a bare
+# --tessdata-dir may not have it.
+PSM=3
+THRESHOLD_METHOD=""
+if [ "$PLAIN" = false ]; then
+    if has_tess_lang osd; then
+        PSM=1
+    else
+        log_warn "No 'osd' language data, so pages will not be auto-rotated."
+    fi
+    # Sauvola thresholds each region against its own neighbourhood, so a shadow
+    # or a yellowed corner no longer swallows the text in it the way a single
+    # page-wide Otsu threshold does. The option only exists from tesseract 5.
+    TESS_MAJOR="$(tesseract --version 2>&1 | awk 'NR==1{split($2, v, "."); print v[1]}')"
+    case "$TESS_MAJOR" in
+        ''|*[!0-9]*) ;;
+        *) if [ "$TESS_MAJOR" -ge 5 ]; then THRESHOLD_METHOD=2; fi ;;
+    esac
 fi
 
 # Only now can the input be checked: pdfinfo ships with poppler, so this has to
@@ -506,17 +602,40 @@ log_info "Step 2/3: OCR Processing ($OCR_LANG) with $JOBS jobs..."
 export LANG_CODE="$OCR_LANG"
 export VERBOSE
 export PRESERVE
+export CLEAN IM PSM THRESHOLD_METHOD TESSDATA_DIR
+
+# The pages already run in parallel, one process each. Left alone, tesseract
+# (OpenMP) and ImageMagick each also spread over every core, so N jobs ran N×N
+# threads that mostly waited on each other.
+if [ "$JOBS" -gt 1 ]; then
+    export OMP_THREAD_LIMIT=1 MAGICK_THREAD_LIMIT=1
+fi
 
 process_page_worker() {
     local img="$1"
     local base="${img%.*}" # remove extension
     local name
     name="$(basename "$img")"
-    
+
     if [ "$VERBOSE" = true ]; then
         echo "Processing $name..." >&2
     fi
-    
+
+    # Straighten the page, then divide out uneven lighting: the page over a
+    # heavily blurred copy of itself is 1 (white) wherever there is only
+    # background, shadow or not, while text stays dark. No -normalize after it:
+    # stretching the contrast turns scanner noise in the margins into specks
+    # that tesseract reads as junk lines. Done in place: the cleaned image is
+    # both what tesseract reads and what the output page shows.
+    if [ "$CLEAN" = true ]; then
+        if ! "$IM" "$img" -background white -deskew 40% +repage \
+                \( +clone -blur 0x25 \) -compose Divide_Src -composite \
+                "$img" 2>"$base.err"; then
+            echo "FAIL $name"
+            return 1
+        fi
+    fi
+
     # tesseract input output -l lang pdf. Its exit status decides what we report:
     # ignoring it (as this used to) meant a page whose OCR crashed produced no
     # page-N.pdf, the merge silently carried on with whatever was left, and the
@@ -524,15 +643,33 @@ process_page_worker() {
     # Under --preserve the page PDF must carry the recognised text and nothing
     # else: it is going to be stamped onto the untouched original, so painting
     # the image again would hide it behind a second, worse copy of itself.
-    local tess_opts=()
+    # The PDF renderer is switched on by its parameter, not by the `pdf` config
+    # file: that file lives in the system tessdata, and a --tessdata-dir that
+    # holds only models (a tessdata_best checkout does) has no configs/, so
+    # tesseract would skip it, write a .txt instead, and still exit 0.
+    local tess_opts=(--psm "$PSM" -c tessedit_create_pdf=1)
+    if [ -n "$TESSDATA_DIR" ]; then
+        tess_opts+=(--tessdata-dir "$TESSDATA_DIR")
+    fi
+    if [ -n "$THRESHOLD_METHOD" ]; then
+        tess_opts+=(-c "thresholding_method=$THRESHOLD_METHOD")
+    fi
     if [ "$PRESERVE" = true ]; then
-        tess_opts=(-c textonly_pdf=1)
+        tess_opts+=(-c textonly_pdf=1)
     fi
 
-    if ! tesseract "$img" "$base" -l "$LANG_CODE" "${tess_opts[@]}" pdf >/dev/null 2>"$base.err"; then
+    if ! tesseract "$img" "$base" -l "$LANG_CODE" "${tess_opts[@]}" >/dev/null 2>"$base.err"; then
         # Drop anything half-written, so a truncated page cannot be counted as
         # a successful one and merged into the output.
         rm -f "$base.pdf"
+        echo "FAIL $name"
+        return 1
+    fi
+    # Exit 0 is not proof of a page: tesseract also exits 0 when it skipped a
+    # renderer. Reporting DONE anyway left the merge to fail with "0 page(s)"
+    # and no reason, since the .err that would explain it had been deleted.
+    if [ ! -s "$base.pdf" ]; then
+        echo "tesseract exited 0 but wrote no PDF" >> "$base.err"
         echo "FAIL $name"
         return 1
     fi

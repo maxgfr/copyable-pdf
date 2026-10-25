@@ -417,10 +417,14 @@ def load_ocr(langs, model):
     # turned an upright page with a shadow upside down, and it reports boxes in
     # the rotated frame. Text-line orientation reads upside-down lines just as
     # well, in the page's own coordinates, which --preserve needs.
+    # No oneDNN: on x86 CPUs PaddlePaddle 3.3 runs these models through it and
+    # fails ("ConvertPirAttribute2RuntimeAttribute not support"). Apple Silicon
+    # never uses it, so only Intel/AMD machines lose some speed.
     common = dict(
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
         use_textline_orientation=True,
+        enable_mkldnn=False,
     )
     if all(lang in v6_langs() for lang in langs):
         return PaddleOCR(

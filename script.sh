@@ -78,42 +78,62 @@ draw_progress_bar() {
     printf "] %d%% (%d/%d)" "$percent" "$current" "$total"
 }
 
-# A redrawn bar is meaningless once stdout is a file: piping a run to a log or
-# to CI used to bury the output under hundreds of \r-joined bar frames on one
-# unreadable line. Off a terminal, report a plain line now and then instead.
 # A spinner for the steps that give no progress of their own: installing
 # PaddleOCR, loading its models, cleaning pages. Off a terminal, one log line.
+#
+# It is never killed. It used to be, and the first progress line stops it from
+# inside the pipeline's subshell, which is not its parent: bash then reaped a
+# job that died of SIGTERM and printed "Terminated: 15" plus the spinner's
+# whole source over the progress bar. Instead, stopping creates a file; the
+# spinner clears its own line, answers with a second file, and exits 0.
 SPINNER_PID=""
+SPINNER_FLAG=""
 spinner_start() {
     local msg="$1"
     if [ ! -t 1 ]; then
         log_info "$msg..."
         return
     fi
+    SPINNER_FLAG="$TEMP_DIR/.spinner-$RANDOM"
     (
         local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
         local i=0 start=$SECONDS
-        while :; do
+        while [ ! -e "$SPINNER_FLAG.stop" ]; do
             printf "\r${BLUE}%s${NC} %s (%ds)" "${frames[i % ${#frames[@]}]}" "$msg" "$((SECONDS - start))"
             i=$((i + 1))
             sleep 0.1
         done
+        printf "\r\033[K"
+        : > "$SPINNER_FLAG.done"
     ) &
     SPINNER_PID=$!
 }
 
-# Safe to call when no spinner runs. Clears the line only if it stopped one,
-# so a progress bar drawn since is left alone.
+# Safe to call from anywhere, any number of times. Returns once the spinner's
+# line is cleared, so whatever prints next starts on a clean line.
 spinner_stop() {
-    if [ -n "$SPINNER_PID" ]; then
-        if kill "$SPINNER_PID" 2>/dev/null; then
-            wait "$SPINNER_PID" 2>/dev/null || true
-            printf "\r\033[K"
-        fi
-        SPINNER_PID=""
+    if [ -z "$SPINNER_PID" ]; then
+        return 0
     fi
+    if [ ! -e "$SPINNER_FLAG.done" ]; then
+        : > "$SPINNER_FLAG.stop"
+        local n=0
+        while [ ! -e "$SPINNER_FLAG.done" ] && [ "$n" -lt 50 ]; do
+            sleep 0.02
+            n=$((n + 1))
+        done
+    fi
+    # Only the main shell is the spinner's parent, so only it can reap it.
+    if [ "$BASHPID" = "$$" ]; then
+        wait "$SPINNER_PID" 2>/dev/null || true
+        rm -f "$SPINNER_FLAG.stop" "$SPINNER_FLAG.done"
+    fi
+    SPINNER_PID=""
 }
 
+# A redrawn bar is meaningless once stdout is a file: piping a run to a log or
+# to CI used to bury the output under hundreds of \r-joined bar frames on one
+# unreadable line. Off a terminal, report a plain line now and then instead.
 report_progress() {
     local current="$1"
     local total="$2"

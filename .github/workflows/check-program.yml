@@ -293,6 +293,22 @@ jobs:
           [ "$w_kept" = "$w_in" ] || { echo "❌ preserve re-rendered the page"; exit 1; }
           echo "✅ saved install reused; --preserve with PaddleOCR works"
 
+      - name: The spinner leaves no job-control noise on a terminal
+        run: |
+          # The spinner only draws on a terminal, so run under one. It was
+          # killed from a subshell that is not its parent, and bash printed
+          # "Terminated: 15" and the spinner's source over the progress bar.
+          cmd="./script.sh --paddle --paddle-model tiny -o tty.pdf r180.pdf"
+          if script --version 2>/dev/null | grep -q util-linux; then
+            script -q -e -c "$cmd" /dev/null > tty.log 2>&1
+          else
+            script -q /dev/null bash -c "$cmd" > tty.log 2>&1
+          fi
+          grep -q "Done!" tty.log || { echo "❌ run did not finish"; cat tty.log; exit 1; }
+          grep -q "Loading PaddleOCR" tty.log || { echo "❌ no spinner drawn, so this proves nothing"; exit 1; }
+          ! grep -qE "Terminated|local frames" tty.log || { echo "❌ job-control noise"; cat tty.log; exit 1; }
+          echo "✅ spinner stopped cleanly"
+
       - name: More than 100 pages goes through the chunked merge
         run: |
           # pdfunite is called in slices of 100 above that count, to stay under

@@ -23,17 +23,18 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng poppler-utils imagemagick ghostscript shellcheck qpdf
+          sudo apt-get install -y poppler-utils imagemagick ghostscript shellcheck qpdf
           echo "CONVERT=convert" >> "$GITHUB_ENV"
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install tesseract poppler imagemagick ghostscript shellcheck qpdf
+          brew install poppler imagemagick ghostscript shellcheck qpdf
+          # ImageMagick only draws the test pages; copyable-pdf does not use it.
           # ImageMagick 7 renamed the tool; `convert` is a deprecated shim there.
           echo "CONVERT=magick" >> "$GITHUB_ENV"
 
-      # The default OCR engine builds its Python environment with uv.
+      # The OCR engine builds its Python environment with uv.
       - name: Install uv
         uses: astral-sh/setup-uv@v6
 
@@ -145,28 +146,39 @@ jobs:
 
       - name: A failed page aborts the run, it does not ship a short PDF
         run: |
-          # The worker used to discard tesseract's exit code and print DONE
-          # regardless, so a page whose OCR crashed simply vanished: the merge
-          # carried on with the survivors and the run exited 0.
-          mkdir -p shim
-          real=$(command -v tesseract)
-          cat > shim/tesseract <<SHIM
+          # A page whose OCR crashed used to vanish: the merge carried on with
+          # the survivors and the run exited 0. A stand-in engine fails page 2
+          # and passes the others, so only the script's handling is under test.
+          home="$RUNNER_TEMP/fake/ocr-engine"
+          mkdir -p "$home/venv/bin"
+          pkgs=$(sed -n 's/^PADDLE_PACKAGES=(\(.*\))$/\1/p' script.sh | tr ' =' '_-')
+          touch "$home/venv/.copyable-pdf-$pkgs"
+          pdfseparate -f 1 -l 1 input_ocr.pdf good-page.pdf
+          cat > "$home/venv/bin/python" <<'FAKE'
           #!/bin/bash
-          for a in "\$@"; do case "\$a" in *page-2.png) echo "simulated OCR crash" >&2; exit 1;; esac; done
-          exec $real "\$@"
-          SHIM
-          chmod +x shim/tesseract
+          echo READY
+          rc=0
+          for a in "$@"; do
+            case "$a" in
+              *page-2.png) echo "simulated OCR crash" > "${a%.png}.err"; echo "FAIL ${a##*/}"; rc=1 ;;
+              *.png) cp "$GOOD_PAGE" "${a%.png}.pdf"; echo DONE ;;
+            esac
+          done
+          exit $rc
+          FAKE
+          chmod +x "$home/venv/bin/python"
           set +e
-          PATH="$PWD/shim:$PATH" ./script.sh --tesseract -o short.pdf input.pdf
+          GOOD_PAGE="$PWD/good-page.pdf" COPYABLE_PDF_HOME="$RUNNER_TEMP/fake" ./script.sh -o short.pdf input.pdf 2> short.log
           rc=$?
           set -e
-          [ "$rc" -eq 1 ] || { echo "❌ expected exit 1, got $rc"; exit 1; }
+          [ "$rc" -eq 1 ] || { echo "❌ expected exit 1, got $rc"; cat short.log; exit 1; }
           test ! -e short.pdf || { echo "❌ wrote a PDF with a page missing"; exit 1; }
-          echo "✅ failed page aborted the run, nothing written"
+          grep -q "simulated OCR crash" short.log || { echo "❌ the reason was not reported"; cat short.log; exit 1; }
+          echo "✅ failed page aborted the run, with its reason, nothing written"
 
       - name: An existing text layer is warned about, not silently replaced
         run: |
-          # input_ocr.pdf already carries tesseract's invisible font layer, so
+          # input_ocr.pdf already carries its invisible text layer, so
           # re-running on it is exactly the case that used to rasterise good
           # text away without a word.
           ./script.sh -o twice.pdf input_ocr.pdf 2> warn.log
@@ -200,8 +212,7 @@ jobs:
           [ "$w_raster" != "$w_in" ] || { echo "❌ the raster path did not re-render, so this proves nothing"; exit 1; }
           echo "✅ preserve kept the original ${w_in}px pages; the raster path made them ${w_raster}px"
 
-      # --- OCR quality. Each fixture is also run where it must fail (Tesseract,
-      # or its old settings), so a test that would pass either way cannot hide. ---
+      # --- OCR quality. ---
 
       - name: Build degraded page fixtures
         run: |
@@ -219,23 +230,20 @@ jobs:
           # Crooked, blurred, noisy and washed out. Seeded, so every run is alike.
           $CONVERT upright.png -seed 1 -background white -rotate 6 -blur 0x1.5 \
             -attenuate 0.6 +noise Gaussian -level 0%,100%,0.7 noisy.png
-          for f in r180 harsh noisy; do
-            $CONVERT "$f.png" -units PixelsPerInch -density 200 "$f.pdf"
+          for f in upright r180 harsh noisy; do
+            $CONVERT "$f.png" -units PixelsPerInch -density 200 -compress zip "$f.pdf"
           done
+          # A phone photo: the source PDF holds a JPEG.
+          $CONVERT harsh.png -quality 70 photo.jpg
+          $CONVERT photo.jpg -units PixelsPerInch -density 200 -compress jpeg photo.pdf
 
-      - name: An upside-down page is turned before OCR, by either engine
+      - name: An upside-down page is turned before OCR, and reads in order
         run: |
-          # Without orientation detection the page reads as reversed gibberish,
-          # with exit 0, so nothing ever flagged it.
+          # Read as it is, the page comes back as reversed gibberish, with exit 0;
+          # read line by line turned round, it comes back in reverse order.
           ./script.sh -o r180_ocr.pdf r180.pdf
-          pdftotext r180_ocr.pdf - | head -n 1 | grep -q "quick brown fox" || { echo "❌ default engine: not rotated, or out of order"; pdftotext r180_ocr.pdf -; exit 1; }
-          ./script.sh --tesseract -o r180_tess.pdf r180.pdf
-          pdftotext r180_tess.pdf - | grep -q "black quartz" || { echo "❌ tesseract: not rotated"; pdftotext r180_tess.pdf -; exit 1; }
-          ./script.sh --tesseract -p -o r180_kept.pdf r180.pdf
-          pdftotext r180_kept.pdf - | grep -q "black quartz" || { echo "❌ tesseract: not rotated under --preserve"; exit 1; }
-          ./script.sh --tesseract --plain -o r180_plain.pdf r180.pdf
-          ! pdftotext r180_plain.pdf - | grep -q "black quartz" || { echo "❌ --plain read it too, so this proves nothing"; exit 1; }
-          echo "✅ upside-down page recognised by both engines"
+          pdftotext r180_ocr.pdf - | head -n 1 | grep -q "quick brown fox" || { echo "❌ not rotated, or out of order"; pdftotext r180_ocr.pdf -; exit 1; }
+          echo "✅ upside-down page recognised in reading order"
 
       - name: A page on its side is turned before OCR
         run: |
@@ -247,47 +255,52 @@ jobs:
 
       - name: A shadow does not swallow the text under it
         run: |
-          # A single page-wide (Otsu) threshold turns the dark corner black,
-          # text and all; Sauvola thresholds each region on its own.
           ./script.sh -o harsh_ocr.pdf harsh.pdf
-          pdftotext harsh_ocr.pdf - | grep -q "daft zebras" || { echo "❌ default engine: shadowed text lost"; pdftotext harsh_ocr.pdf -; exit 1; }
-          ./script.sh --tesseract -o harsh_tess.pdf harsh.pdf
-          pdftotext harsh_tess.pdf - | grep -qi "ebras" || { echo "❌ tesseract: shadowed text lost"; pdftotext harsh_tess.pdf -; exit 1; }
-          ./script.sh --tesseract --plain -o harsh_plain.pdf harsh.pdf
-          ! pdftotext harsh_plain.pdf - | grep -qi "ebras" || { echo "❌ --plain read it too, so this proves nothing"; exit 1; }
+          pdftotext harsh_ocr.pdf - | grep -q "daft zebras" || { echo "❌ shadowed text lost"; pdftotext harsh_ocr.pdf -; exit 1; }
           echo "✅ shadowed line recognised"
 
-      - name: --clean recovers a crooked, noisy scan for Tesseract
+      - name: A crooked, noisy scan is read
         run: |
-          ./script.sh --tesseract -c -o noisy_clean.pdf noisy.pdf
-          pdftotext noisy_clean.pdf - | grep -q "black quartz" || { echo "❌ --clean did not recover it"; pdftotext noisy_clean.pdf -; exit 1; }
-          ./script.sh --tesseract -o noisy_raw.pdf noisy.pdf
-          ! pdftotext noisy_raw.pdf - | grep -q "black quartz" || { echo "❌ readable without --clean, so this proves nothing"; exit 1; }
-          echo "✅ --clean recovered the noisy page"
-
-      - name: --tessdata-dir works with a directory of bare models
-        run: |
-          # A tessdata_best checkout holds models only: no configs/pdf, no osd.
-          # Asking for the `pdf` config there made tesseract write a .txt and
-          # exit 0, and the run then failed with "0 page(s)" and no reason.
-          sysdir=$(tesseract --list-langs 2>&1 | sed -n 's/.*"\(.*\)".*/\1/p' | head -n 1)
-          mkdir -p models
-          cp "$sysdir/eng.traineddata" models/
-          ./script.sh --tesseract --tessdata-dir models -o models.pdf input.pdf
-          pdftotext models.pdf - | grep -q "Hello World" || { echo "❌ no OCR text"; exit 1; }
-          echo "✅ bare model directory works"
-
-      # --- The default engine (PaddleOCR's models through RapidOCR). ---
-
-      - name: The default engine reads what Tesseract cannot, and is kept for next time
-        run: |
-          # noisy.pdf without --clean: Tesseract returns nothing (checked above).
-          ./script.sh -o noisy_default.pdf noisy.pdf
-          text=$(pdftotext noisy_default.pdf -)
+          ./script.sh -o noisy_ocr.pdf noisy.pdf
+          text=$(pdftotext noisy_ocr.pdf -)
           echo "$text" | grep -q "brown fox" && echo "$text" | grep -q "zebras" || { echo "❌ text missing"; echo "$text"; exit 1; }
+          echo "✅ noisy page read"
+
+      - name: Each word sits where it is on the page
+        run: |
+          # One text run per word, not one per line: selecting or finding a word
+          # highlights that word. The page has 4 lines of 9 words.
+          ./script.sh -o upright_ocr.pdf upright.pdf
+          runs=$(qpdf --qdf --object-streams=disable upright_ocr.pdf - | grep -c ' Tj$')
+          [ "$runs" -ge 30 ] || { echo "❌ $runs text runs: placed by line, not by word"; exit 1; }
+          pdftotext upright_ocr.pdf - | grep -q "Sphinx of black quartz, judge my solemn vow now." || { echo "❌ words run together"; pdftotext upright_ocr.pdf -; exit 1; }
+          echo "✅ $runs word runs, text intact"
+
+      - name: Photos stay JPEG, scans stay lossless
+        run: |
+          # Stored losslessly, a 3 MB PDF of phone photos came out at 90 MB.
+          ./script.sh -o photo_ocr.pdf photo.pdf
+          [ "$(pdfimages -list photo_ocr.pdf | awk 'NR==3{print $9}')" = "jpeg" ] || { echo "❌ photo not stored as JPEG"; pdfimages -list photo_ocr.pdf; exit 1; }
+          pdftotext photo_ocr.pdf - | grep -q "daft zebras" || { echo "❌ no text"; exit 1; }
+          [ "$(pdfimages -list harsh_ocr.pdf | awk 'NR==3{print $9}')" = "image" ] || { echo "❌ scan not stored losslessly"; pdfimages -list harsh_ocr.pdf; exit 1; }
+          echo "✅ photo $(du -h photo_ocr.pdf | cut -f1) as JPEG; scan lossless"
+
+      - name: Pages come back in order whatever the number of workers
+        run: |
+          pdfunite upright.pdf r180.pdf harsh.pdf noisy.pdf upright.pdf r180.pdf six.pdf
+          ./script.sh -j 1 -o six_j1.pdf six.pdf
+          ./script.sh -j 3 -o six_j3.pdf six.pdf
+          cmp -s <(pdftotext six_j1.pdf -) <(pdftotext six_j3.pdf -) || { echo "❌ -j 3 differs from -j 1"; exit 1; }
+          [ "$(pdfinfo six_j3.pdf | awk '/^Pages/{print $2}')" = "6" ] || { echo "❌ page count"; exit 1; }
+          echo "✅ same 6 pages, same order, with 1 or 3 workers"
+
+      # --- The engine's install. ---
+
+      - name: The engine is kept for next time
+        run: |
           # Installed by the very first run of this job, and still there.
           test -x "$HOME/.cache/copyable-pdf/ocr-engine/venv/bin/python" || { echo "❌ engine not kept"; exit 1; }
-          echo "✅ default engine read the noisy page; its install is kept"
+          echo "✅ engine install kept"
 
       - name: --no-save leaves nothing behind
         run: |
@@ -338,8 +351,7 @@ jobs:
           for i in $(seq 1 101); do args+=(one.pdf); done
           pdfunite "${args[@]}" big.pdf
           [ "$(pdfinfo big.pdf | awk '/^Pages/{print $2}')" = "101" ] || { echo "❌ fixture is not 101 pages"; exit 1; }
-          # Tesseract: the merge is under test here, and its workers run in parallel.
-          ./script.sh --tesseract -d 72 -o chunked.pdf big.pdf
+          ./script.sh --model tiny -d 72 -o chunked.pdf big.pdf
           pages=$(pdfinfo chunked.pdf | awk '/^Pages/{print $2}')
           [ "$pages" = "101" ] || { echo "❌ expected 101 pages, got $pages"; exit 1; }
           echo "✅ 101 pages survived the chunked merge"
@@ -358,10 +370,12 @@ jobs:
           ./script.sh -o outdir input.pdf;             [ $? -eq 2 ] || { echo "❌ output is a directory"; exit 1; }
           ./script.sh -o self.pdf self.pdf;            [ $? -eq 2 ] || { echo "❌ output overwrites input"; exit 1; }
           ./script.sh -o x.pdf notpdf.pdf;             [ $? -eq 2 ] || { echo "❌ input is not a PDF"; exit 1; }
-          ./script.sh -c -p -o x.pdf input.pdf;        [ $? -eq 2 ] || { echo "❌ --clean with --preserve"; exit 1; }
-          ./script.sh --tessdata-dir nope -o x.pdf input.pdf; [ $? -eq 2 ] || { echo "❌ missing tessdata dir"; exit 1; }
           ./script.sh --model huge -o x.pdf input.pdf;   [ $? -eq 2 ] || { echo "❌ bad model"; exit 1; }
-          ./script.sh -l kli -o x.pdf input.pdf;         [ $? -eq 2 ] || { echo "❌ language the default engine lacks"; exit 1; }
+          ./script.sh -l kli -o x.pdf input.pdf;         [ $? -eq 2 ] || { echo "❌ language no model reads"; exit 1; }
+          # Gone with Tesseract in 3.0: refused, not silently ignored.
+          for opt in --tesseract --plain "--tessdata-dir x" -c --clean; do
+            ./script.sh $opt -o x.pdf input.pdf;         [ $? -eq 2 ] || { echo "❌ $opt accepted"; exit 1; }
+          done
           set -e
           test ! -e x.pdf
           # The source must still be the source, not a rasterised copy of itself.

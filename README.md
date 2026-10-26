@@ -1,6 +1,6 @@
 # copyable-pdf
 
-> A bash script that turns scanned PDFs and phone photos of documents into searchable, copyable PDFs, with PaddleOCR's models (or Tesseract) running locally.
+> A bash script that turns scanned PDFs and phone photos of documents into searchable, copyable PDFs, with PaddleOCR's models running locally.
 
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -9,23 +9,21 @@
 ## Features
 
 -   **OCR**: Make scanned documents searchable and copyable.
--   **Strong recognition by default**: PaddleOCR's PP-OCRv6 models, run by
+-   **Strong recognition**: PaddleOCR's PP-OCRv6 models, run by
     [RapidOCR](https://github.com/RapidAI/RapidOCR) on ONNX Runtime. They read
-    phone photos, crooked, faded or noisy scans that Tesseract misses, about a
-    page a second on a laptop CPU. Tesseract remains available with
-    `--tesseract`.
+    phone photos, small print, crooked, faded or noisy scans, at about a page a
+    second on a laptop CPU.
+-   **Any way up**: Upside-down and sideways pages are turned automatically, and
+    come out in reading order.
+-   **Word-accurate text layer**: Every word sits where it is on the page, so
+    selecting or finding a word highlights that word.
+-   **Small output**: Photos stay JPEG, scans are stored losslessly and in grey
+    when they have no colour.
 -   **Preserve mode**: Keep the original pages untouched and add an invisible
     text layer on top, instead of rebuilding the PDF from images.
--   **Any way up**: Upside-down and sideways pages are turned automatically,
-    and shadows or yellowed corners no longer hide the text in them.
--   **Clean mode**: Straighten crooked scans and flatten uneven lighting before
-    OCR.
--   **Parallel Processing**: Uses multiple cores for faster OCR.
+-   **Parallel**: Several pages at a time on multi-core machines.
 -   **Text sidecars**: Also write the recognised text as `.txt` or `.md`.
 -   **Interactive mode**: Run it with no arguments and it asks for each setting.
--   **Dependency Check**: Automatically checks for missing tools, and offers to
-    install them and any missing language pack.
--   **Customizable**: Set language, DPI and the number of parallel jobs.
 
 ## Installation
 
@@ -35,8 +33,8 @@
 brew install maxgfr/tap/copyable-pdf
 ```
 
-This installs everything: the OCR engine and its models, Tesseract with every
-language, qpdf and ImageMagick. The first run starts straight away.
+This installs everything, the OCR engine and its models included, so the first
+run starts straight away.
 
 ### As an agent skill
 
@@ -69,30 +67,22 @@ install the CLI as well.
 
 ### Dependencies
 
-Ensure you have the following installed:
 -   **poppler**: For `pdftoppm`, `pdfunite`, `pdfinfo` and `pdftotext`.
--   **uv**: Builds the OCR engine's environment on first use (about 300 MB,
-    kept in `~/.cache/copyable-pdf/ocr-engine`).
--   **tesseract** (optional): Only needed for `--tesseract`. When present, its
-    glyphless font is also used for the invisible text.
+-   **uv**: Builds the OCR engine's environment on first use (about 300 MB with
+    its models, kept in `~/.cache/copyable-pdf/ocr-engine`).
 -   **qpdf** (optional): Only needed for `--preserve`.
--   **ImageMagick** (optional): Only needed for `--clean`.
 
 On macOS (Homebrew):
 ```bash
 brew install poppler uv
-brew install tesseract       # optional, for --tesseract
 brew install qpdf            # optional, for --preserve
-brew install imagemagick     # optional, for --clean
 ```
 
 On Ubuntu/Debian:
 ```bash
 sudo apt-get install poppler-utils
 curl -LsSf https://astral.sh/uv/install.sh | sh
-sudo apt-get install tesseract-ocr     # optional, for --tesseract
-sudo apt-get install qpdf              # optional, for --preserve
-sudo apt-get install imagemagick       # optional, for --clean
+sudo apt-get install qpdf    # optional, for --preserve
 ```
 
 ## Usage
@@ -107,10 +97,9 @@ the language, the DPI, the sidecars and the output name in turn.
 ### How it works
 
 1.  Every page is rendered to an image at the chosen DPI, and the OCR engine
-    finds and reads every line of text on it. A page that reads poorly as it
-    is gets read turned round and on each side too, and the best reading wins,
-    so upside-down and sideways pages come out right. With `--clean`, each page
-    is also straightened and its lighting evened out first.
+    finds and reads every line of text on it, word by word. A page that reads
+    poorly as it is, or whose lines mostly read upside down, is read again
+    turned round or on its side, and the best reading wins.
 2.  By default those recognised pages are merged into a **new** PDF. The result
     is searchable everywhere, but it is a re-encoded copy of the original.
 3.  With `--preserve`, only the recognised text is kept and stamped onto the
@@ -123,24 +112,24 @@ handing back a document that is quietly missing pages.
 
 | Option | Description | Default |
 | :--- | :--- | :--- |
-| `-l, --lang <code>` | Language code(s), `+` separated (e.g. `eng`, `fra`, `eng+fra`) | `eng` |
+| `-l, --lang <code>` | Language code(s), `+` separated: three letters (`eng`, `fra`, `spa`, `fra+eng`) or PaddleOCR's own (`en`, `fr`) | `eng` |
 | `-o, --output <path>` | Custom output file path | `input_ocr.pdf` |
 | `-d, --dpi <num>` | DPI resolution for OCR | `300` |
-| `-j, --jobs <num>` | Number of parallel jobs | Auto-detect |
+| `-j, --jobs <num>` | Number of OCR processes working on pages at once | a third of the cores, up to 4 |
 | `-t, --text` | Generate an additional .txt file | `false` |
 | `-m, --markdown` | Generate an additional .md file (layout-preserved plain text) | `false` |
 | `-p, --preserve` | Keep the original pages, add an invisible text layer on top (needs `qpdf`) | `false` |
-| `-c, --clean` | Straighten pages and flatten shadows before OCR (needs ImageMagick). The cleaned page is what the output shows. Not with `--preserve` | `false` |
-| `--model <size>` | OCR model: `tiny` (fastest), `small` or `medium` (most accurate) | `small` |
+| `--model <size>` | OCR model: `tiny` (fastest), `small` or `medium` | `small` |
 | `--no-save` | Install the OCR engine for this run only, in the temp dir, and delete it afterwards | `false` |
 | `--install-engine` | Install the OCR engine and its models, then exit (`brew install` does this for you) | - |
-| `--tesseract` | Recognise with Tesseract instead. See [Tesseract](#tesseract) | `false` |
-| `--plain` | With `--tesseract`: skip automatic rotation and adaptive thresholding | `false` |
-| `--tessdata-dir <path>` | With `--tesseract`: read language models from this directory, e.g. a [`tessdata_best`](https://github.com/tesseract-ocr/tessdata_best) checkout | system tessdata |
 | `-k, --keep` | Keep temporary files (debug) | `false` |
 | `-v, --verbose` | Verbose output | `false` |
 | `-h, --help` | Show help message | - |
 | `-V, --version` | Print the version and exit | - |
+
+`--paddle`, `--save-paddle` and `--paddle-model` from 1.6 are still accepted.
+`--tesseract`, `--plain`, `--tessdata-dir` and `--clean` were removed in 3.0
+with Tesseract, and are refused with an error rather than ignored.
 
 ### Examples
 
@@ -149,9 +138,14 @@ handing back a document that is quietly missing pages.
 copyable-pdf document.pdf
 ```
 
-**Specify language (French) and higher DPI:**
+**A French document, with the text alongside:**
 ```bash
-copyable-pdf -l fra -d 600 document.pdf
+copyable-pdf -l fra -t document.pdf
+```
+
+**Phone photos of a Spanish form, originals kept:**
+```bash
+copyable-pdf -l spa -p photos.pdf
 ```
 
 **Explicitly set output filename:**
@@ -159,77 +153,60 @@ copyable-pdf -l fra -d 600 document.pdf
 copyable-pdf -o searchable_doc.pdf scan.pdf
 ```
 
-**Keep the original pages untouched:**
-```bash
-copyable-pdf --preserve scan.pdf
-```
-
-**Clean up a crooked phone photo of a French page:**
-```bash
-copyable-pdf --clean -l fra photo.pdf
-```
-
 ## Getting the best results
 
 -   **Set the right language**: `-l fra`, `-l spa`, or `-l fra+eng` for mixed
     documents.
--   **Use `--preserve` for photos.** Without it every page is rebuilt from a
-    300 DPI rendering, and a 3 MB PDF of phone photos can come out at 90 MB.
-    With it the original images are kept and only the text is added.
--   **Raise the DPI for small print.** 300 suits most documents; try 400 for
-    footnotes or dense tables.
--   **`--model medium`** when every character counts and time does not.
--   **With `--tesseract`**: `--clean` helps a lot on crooked and shadowed
-    scans (it changes how the output looks, and cannot be combined with
-    `--preserve`); the `tessdata_best` models (`--tessdata-dir`) are slower and
-    not always better; fall back to `--plain` if automatic rotation ever
-    misreads a page with very little text on it.
+-   **Use `--preserve` for anything worth keeping.** The original images,
+    vectors and metadata stay exactly as they were, with only the text added.
+-   **Raise the DPI for very small print.** 300 suits most documents, down to
+    5-6 pt text; try 400 for anything smaller.
+-   **`--model medium`** is slower and, on the benchmark below, no more
+    accurate: keep `small` unless a document of yours proves otherwise.
 
 ## OCR engine
 
-By default the text is recognised by PaddleOCR's PP-OCRv6 models (PP-OCRv5 for
-Cyrillic, Arabic, Korean and other scripts v6 does not read), run by
+The text is recognised by PaddleOCR's PP-OCRv6 models (PP-OCRv5 for Cyrillic,
+Arabic, Korean and other scripts v6 does not read), run by
 [RapidOCR](https://github.com/RapidAI/RapidOCR) on ONNX Runtime. They come from
 the same project as the `paddleocr` Python package and recognise the same, but
 without its 1 GB PaddlePaddle runtime, and several times faster on a CPU.
 
--   **Installed once, kept.** The first run builds the engine with `uv`
-    (about 300 MB with its models, under a minute) in
+-   **Installed once, kept.** The first run builds the engine with `uv` in
     `~/.cache/copyable-pdf/ocr-engine`, and every later run reuses it.
     `brew install` does this at install time. Delete that folder to remove it,
     or pass `--no-save` to install for one run and delete it afterwards.
--   **Fast**: about a second a page with the default `small` model on a laptop
-    CPU. `--model tiny` is faster, `--model medium` more accurate and slower.
--   **Languages**: the same `-l` codes as Tesseract. Latin-script languages,
-    English, Chinese and Japanese share one model, so `-l fra+eng` works. Other
-    scripts take one language at a time.
+-   **Languages**: Latin-script languages, English, Chinese and Japanese share
+    one model, so `-l fra+eng` works. Other scripts take one language at a
+    time.
 -   **Private**: models are downloaded once; pages and text never leave your
     machine.
 
-On a phone photo of a Spanish form (perspective, dark background, BORRADOR
-watermark, JPEG; 2 pages, 21 printed labels each), on an Apple Silicon laptop:
+Measured on generated pages with known text, scored by character accuracy per
+line, on an Apple Silicon laptop (10 cores):
 
-| Engine | Labels read | Time |
+| Page | 2.0 | 3.0 |
 | :--- | :--- | :--- |
-| Default (`small`) | 100% | 11 s |
-| Default, `--model medium` | 100% | 33 s |
-| `paddleocr` package, small (1.6's `--paddle`) | 98% | 22 s |
-| `--tesseract` | 48% | 9 s |
+| Clean 11 pt | 94.9% | **100%** |
+| Small print, 7 pt | 97.5% | **100%** |
+| Tiny print, 5.5 pt | 97.3% | **100%** |
+| Dense, two columns | 99.7% | **99.9%** |
+| French and Spanish accents | 91.9% | **99.99%** |
+| Noisy 150 DPI scan | 94.8% | **99.99%** |
+| Phone photos (2 pages) | 91.5%, 17.7 MB | **99.98%, 2.7 MB** |
+| Upside down / sideways | 93.6% / 93.7% | **100% / 100%** |
+| 24 pages | 128 s, 53 MB | **90 s, 35 MB** |
+
+Most of the gain comes from one setting: the line orientation classifier
+RapidOCR picks by default turned about one upright line in ten upside down,
+which then read as junk. 3.0 uses PP-OCRv5's, the one the `paddleocr` package
+uses.
 
 Why not a larger model? The document AI models at the top of 2026's benchmarks
 (PaddleOCR-VL, GLM-OCR, MinerU, DeepSeek-OCR) are built for GPUs, are slow on a
 CPU, and return text without the position of each line, which a searchable PDF
 needs. PP-OCRv6 is the strongest engine that runs well on any machine and says
-where every line is.
-
-## Tesseract
-
-`--tesseract` recognises with [Tesseract](https://github.com/tesseract-ocr/tesseract)
-instead: no Python environment, but much weaker on photos and poor scans. It
-detects page orientation and thresholds each region on its own (Sauvola) by
-default; `--plain` turns both off. `--clean` helps it most on crooked and
-shadowed scans, and `--tessdata-dir` points it at other models such as
-`tessdata_best`.
+where every word is.
 
 ## Preserve mode
 
@@ -239,12 +216,9 @@ metadata do not come back.
 
 `--preserve` avoids that: images, vectors, bookmarks, metadata and file size
 stay exactly as they were, with the recognised text selectable on top. It needs
-`qpdf`, and only when the flag is used, so the default path still depends on
-nothing but Tesseract and poppler.
-
-Use it for anything worth keeping. Use the default when `qpdf` is unavailable
-and a plain searchable copy is enough.
+`qpdf`, and only when the flag is used.
 
 ## License
 
-MIT
+MIT. The invisible text uses Tesseract's GlyphLessFont (Apache-2.0), embedded
+in the script.

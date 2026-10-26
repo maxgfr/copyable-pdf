@@ -306,7 +306,7 @@ setup_engine() {
     ENGINE_MODELS_DIR="$home/models"
 
     local marker
-    marker="$home/venv/.copyable-pdf-$(echo "${ENGINE_PACKAGES[*]} $ENGINE_RESOLVED_AT" | tr ' =:' '_--')"
+    marker="$home/venv/.copyable-pdf-$(echo "${ENGINE_PACKAGES[*]} $ENGINE_RESOLVED_AT" | tr ' =:' '___')"
     if [ -x "$ENGINE_PY" ] && [ -f "$marker" ]; then
         if [ "$VERBOSE" = true ]; then
             log_info "Using the OCR engine in $home"
@@ -1040,7 +1040,9 @@ fi
 # come after the dependency checks. A corrupt or password-protected PDF used to
 # get as far as pdftoppm and come back as a raw poppler error with a temp
 # directory already created.
-if ! PDF_INFO="$(pdfinfo "$INPUT_FILE" 2>&1)"; then
+# NULs are dropped: some producers leave them in metadata, and bash warns about
+# every one ("ignored null byte in input"). pipefail keeps pdfinfo's status.
+if ! PDF_INFO="$(pdfinfo "$INPUT_FILE" 2>&1 | tr -d '\0')"; then
     log_error "'$INPUT_FILE' is not a readable PDF (corrupt or encrypted)."
     log_error "  $(echo "$PDF_INFO" | tail -n 1)"
     exit 2

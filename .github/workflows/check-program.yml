@@ -152,7 +152,7 @@ jobs:
           mkdir -p "$home/venv/bin"
           pkgs=$(sed -n 's/^ENGINE_PACKAGES=(\(.*\))$/\1/p' script.sh)
           resolved=$(sed -n 's/^ENGINE_RESOLVED_AT="\(.*\)"$/\1/p' script.sh)
-          touch "$home/venv/.copyable-pdf-$(echo "$pkgs $resolved" | tr ' =:' '_--')"
+          touch "$home/venv/.copyable-pdf-$(echo "$pkgs $resolved" | tr ' =:' '___')"
           pdfseparate -f 1 -l 1 input_ocr.pdf good-page.pdf
           cat > "$home/venv/bin/python" <<'FAKE'
           #!/bin/bash

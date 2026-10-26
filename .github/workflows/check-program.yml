@@ -112,19 +112,18 @@ jobs:
         run: |
           # `local` outside a function aborted the run under `set -e`, so running
           # with no arguments never produced anything at all.
-          printf 'input.pdf\n\n\nn\nn\n\n' | ./script.sh
+          printf 'input.pdf\n\n\nn\n\n' | ./script.sh
           test -f input_ocr.pdf
 
       - name: Sidecars land beside the output, not beside its directory
         run: |
           # `${OUTPUT_FILE%.*}` strips at the last dot ANYWHERE in the path, so a
-          # dotted directory sent the .md one level up, silently and with exit 0.
+          # dotted directory sent the .txt one level up, silently and with exit 0.
           mkdir -p "out/v1.2"
-          ./script.sh -o "out/v1.2/report.pdf" -m -t input.pdf
-          test -f "out/v1.2/report.md" || { echo "❌ .md missing from out/v1.2"; exit 1; }
+          ./script.sh -o "out/v1.2/report.pdf" -t input.pdf
           test -f "out/v1.2/report.txt" || { echo "❌ .txt missing from out/v1.2"; exit 1; }
-          test ! -e "out/v1.md" || { echo "❌ .md escaped to out/v1.md"; exit 1; }
-          echo "✅ sidecars stayed put"
+          test ! -e "out/v1.txt" || { echo "❌ .txt escaped to out/v1.txt"; exit 1; }
+          echo "✅ sidecar stayed put"
 
       - name: A temp directory containing a space still merges
         run: |
@@ -151,7 +150,7 @@ jobs:
           # and passes the others, so only the script's handling is under test.
           home="$RUNNER_TEMP/fake/ocr-engine"
           mkdir -p "$home/venv/bin"
-          pkgs=$(sed -n 's/^PADDLE_PACKAGES=(\(.*\))$/\1/p' script.sh | tr ' =' '_-')
+          pkgs=$(sed -n 's/^ENGINE_PACKAGES=(\(.*\))$/\1/p' script.sh | tr ' =' '_-')
           touch "$home/venv/.copyable-pdf-$pkgs"
           pdfseparate -f 1 -l 1 input_ocr.pdf good-page.pdf
           cat > "$home/venv/bin/python" <<'FAKE'
@@ -302,13 +301,6 @@ jobs:
           test -x "$HOME/.cache/copyable-pdf/ocr-engine/venv/bin/python" || { echo "❌ engine not kept"; exit 1; }
           echo "✅ engine install kept"
 
-      - name: --no-save leaves nothing behind
-        run: |
-          XDG_CACHE_HOME="$RUNNER_TEMP/nosave" ./script.sh --no-save --model tiny -o nosave.pdf input.pdf
-          pdftotext nosave.pdf - | grep -q "Hello World" || { echo "❌ no text"; exit 1; }
-          test ! -e "$RUNNER_TEMP/nosave/copyable-pdf" || { echo "❌ left an install behind"; exit 1; }
-          echo "✅ --no-save cleaned up after itself"
-
       - name: --install-engine prepares everything, as brew install does
         run: |
           # The formula points COPYABLE_PDF_HOME into its prefix and runs this
@@ -331,7 +323,7 @@ jobs:
           # The spinner only draws on a terminal, so run under one. It was
           # killed from a subshell that is not its parent, and bash printed
           # "Terminated: 15" and the spinner's source over the progress bar.
-          cmd="./script.sh --model tiny -o tty.pdf r180.pdf"
+          cmd="./script.sh -o tty.pdf r180.pdf"
           if script --version 2>/dev/null | grep -q util-linux; then
             script -q -e -c "$cmd" /dev/null > tty.log 2>&1
           else
@@ -351,7 +343,7 @@ jobs:
           for i in $(seq 1 101); do args+=(one.pdf); done
           pdfunite "${args[@]}" big.pdf
           [ "$(pdfinfo big.pdf | awk '/^Pages/{print $2}')" = "101" ] || { echo "❌ fixture is not 101 pages"; exit 1; }
-          ./script.sh --model tiny -d 72 -o chunked.pdf big.pdf
+          ./script.sh -d 72 -o chunked.pdf big.pdf
           pages=$(pdfinfo chunked.pdf | awk '/^Pages/{print $2}')
           [ "$pages" = "101" ] || { echo "❌ expected 101 pages, got $pages"; exit 1; }
           echo "✅ 101 pages survived the chunked merge"
@@ -370,10 +362,10 @@ jobs:
           ./script.sh -o outdir input.pdf;             [ $? -eq 2 ] || { echo "❌ output is a directory"; exit 1; }
           ./script.sh -o self.pdf self.pdf;            [ $? -eq 2 ] || { echo "❌ output overwrites input"; exit 1; }
           ./script.sh -o x.pdf notpdf.pdf;             [ $? -eq 2 ] || { echo "❌ input is not a PDF"; exit 1; }
-          ./script.sh --model huge -o x.pdf input.pdf;   [ $? -eq 2 ] || { echo "❌ bad model"; exit 1; }
           ./script.sh -l kli -o x.pdf input.pdf;         [ $? -eq 2 ] || { echo "❌ language no model reads"; exit 1; }
-          # Gone with Tesseract in 3.0: refused, not silently ignored.
-          for opt in --tesseract --plain "--tessdata-dir x" -c --clean; do
+          # Gone in 3.0: refused, not silently ignored.
+          for opt in --tesseract --plain "--tessdata-dir x" -c --clean --paddle --save-paddle \
+                     "--model tiny" "--paddle-model tiny" --no-save -m --markdown; do
             ./script.sh $opt -o x.pdf input.pdf;         [ $? -eq 2 ] || { echo "❌ $opt accepted"; exit 1; }
           done
           set -e

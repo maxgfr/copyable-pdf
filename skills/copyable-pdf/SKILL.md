@@ -25,7 +25,7 @@ can also write the recognised text beside it.
    - `--preserve`: `qpdf`.
 4. Outside Homebrew, the first run installs the OCR engine (about 300 MB,
    under a minute) into `~/.cache/copyable-pdf/ocr-engine` and keeps it. Tell
-   the user before that first run. `--no-save` installs for one run only.
+   the user before that first run.
 
 ## Running
 
@@ -43,16 +43,15 @@ Pick the options from the document and the request:
 | Not English (most important setting) | `-l fra`, `-l spa`, or mixed `-l fra+eng` |
 | The original must stay untouched (archives, legal documents, anything kept) | `-p` / `--preserve` |
 | Print smaller than 5-6 pt | `-d 400` |
-| Speed matters more than accuracy | `--model tiny` |
-| The user wants the text itself | `-t` (plain text), `-m` (layout kept, written as `.md`) |
+| The user wants the text itself | `-t` (writes a `.txt` beside the PDF) |
 | Custom output path | `-o path/out.pdf` (the directory must exist) |
 
 - Pages are turned upright automatically, upside down or sideways.
 - Without `--preserve` the PDF is rebuilt from 300 DPI renderings: photos stay
   JPEG and scans lossless, but vector content is rasterised.
-- `--tesseract`, `--plain`, `--tessdata-dir` and `--clean` no longer exist
-  (removed in 3.0, exit 2). `--paddle`, `--save-paddle` and `--paddle-model`
-  are still accepted and change nothing.
+- Removed in 3.0, and refused with exit 2: `--tesseract`, `--plain`,
+  `--tessdata-dir`, `--clean`, `--model`, `--no-save`, `-m/--markdown`,
+  `--paddle`, `--save-paddle`, `--paddle-model`.
 
 ## Results
 

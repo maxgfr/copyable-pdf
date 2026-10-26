@@ -22,7 +22,7 @@
 -   **Preserve mode**: Keep the original pages untouched and add an invisible
     text layer on top, instead of rebuilding the PDF from images.
 -   **Parallel**: Several pages at a time on multi-core machines.
--   **Text sidecars**: Also write the recognised text as `.txt` or `.md`.
+-   **Text sidecar**: Also write the recognised text as `.txt`.
 -   **Interactive mode**: Run it with no arguments and it asks for each setting.
 
 ## Installation
@@ -92,7 +92,7 @@ copyable-pdf [options] input.pdf
 ```
 
 Run it with no arguments for interactive mode, which asks for the input path,
-the language, the DPI, the sidecars and the output name in turn.
+the language, the DPI, the text sidecar and the output name in turn.
 
 ### How it works
 
@@ -117,19 +117,16 @@ handing back a document that is quietly missing pages.
 | `-d, --dpi <num>` | DPI resolution for OCR | `300` |
 | `-j, --jobs <num>` | Number of OCR processes working on pages at once | a third of the cores, up to 4 |
 | `-t, --text` | Generate an additional .txt file | `false` |
-| `-m, --markdown` | Generate an additional .md file (layout-preserved plain text) | `false` |
 | `-p, --preserve` | Keep the original pages, add an invisible text layer on top (needs `qpdf`) | `false` |
-| `--model <size>` | OCR model: `tiny` (fastest), `small` or `medium` | `small` |
-| `--no-save` | Install the OCR engine for this run only, in the temp dir, and delete it afterwards | `false` |
 | `--install-engine` | Install the OCR engine and its models, then exit (`brew install` does this for you) | - |
 | `-k, --keep` | Keep temporary files (debug) | `false` |
 | `-v, --verbose` | Verbose output | `false` |
 | `-h, --help` | Show help message | - |
 | `-V, --version` | Print the version and exit | - |
 
-`--paddle`, `--save-paddle` and `--paddle-model` from 1.6 are still accepted.
-`--tesseract`, `--plain`, `--tessdata-dir` and `--clean` were removed in 3.0
-with Tesseract, and are refused with an error rather than ignored.
+3.0 removed `--tesseract`, `--plain`, `--tessdata-dir`, `--clean`, `--model`,
+`--no-save`, `-m/--markdown` and the 1.6 `--paddle` options. They are refused
+with an error rather than ignored.
 
 ### Examples
 
@@ -161,8 +158,6 @@ copyable-pdf -o searchable_doc.pdf scan.pdf
     vectors and metadata stay exactly as they were, with only the text added.
 -   **Raise the DPI for very small print.** 300 suits most documents, down to
     5-6 pt text; try 400 for anything smaller.
--   **`--model medium`** is slower and, on the benchmark below, no more
-    accurate: keep `small` unless a document of yours proves otherwise.
 
 ## OCR engine
 
@@ -174,8 +169,10 @@ without its 1 GB PaddlePaddle runtime, and several times faster on a CPU.
 
 -   **Installed once, kept.** The first run builds the engine with `uv` in
     `~/.cache/copyable-pdf/ocr-engine`, and every later run reuses it.
-    `brew install` does this at install time. Delete that folder to remove it,
-    or pass `--no-save` to install for one run and delete it afterwards.
+    `brew install` does this at install time. Delete that folder to remove
+    it.
+-   **One model size**: `small`. On the benchmark below, `medium` read no
+    better at three times the time, and `tiny` made mistakes.
 -   **Languages**: Latin-script languages, English, Chinese and Japanese share
     one model, so `-l fra+eng` works. Other scripts take one language at a
     time.

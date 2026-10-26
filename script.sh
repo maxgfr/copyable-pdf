@@ -15,18 +15,15 @@ KEEP_TEMP=false
 VERBOSE=false
 COLOR_SUPPORT=true
 GEN_TEXT=false
-GEN_MD=false
 PRESERVE=false
 # The OCR engine: PaddleOCR's PP-OCRv6 models, run by RapidOCR on ONNX Runtime.
-PADDLE_MODEL="small"
-NO_SAVE=false
 INSTALL_ONLY=false
 # Pinned: the helper below relies on this RapidOCR's results and model names,
 # and a pin change is what makes an installed engine get rebuilt.
-PADDLE_PACKAGES=(rapidocr==3.10.0 onnxruntime==1.31.0)
+ENGINE_PACKAGES=(rapidocr==3.10.0 onnxruntime==1.31.0)
 # Where the engine lives between runs. The Homebrew formula points this inside
 # its own prefix (COPYABLE_PDF_HOME), where `brew install` has already put it.
-PADDLE_SAVED_HOME="${COPYABLE_PDF_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/copyable-pdf}/ocr-engine"
+ENGINE_HOME="${COPYABLE_PDF_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/copyable-pdf}/ocr-engine"
 
 # --- Colors ---
 if [ -t 1 ] && [ "$COLOR_SUPPORT" = true ]; then
@@ -170,14 +167,9 @@ print_usage() {
     echo "  -d, --dpi <num>      DPI resolution for OCR (default: 300)"
     echo "  -j, --jobs <num>     OCR processes working on pages at once (default: a third of the cores, up to 4)"
     echo "  -t, --text           Generate an additional .txt file"
-    echo "  -m, --markdown       Generate an additional .md file (layout-preserved plain text)"
     echo "  -p, --preserve       Keep the original pages and add an invisible text"
     echo "                       layer on top (needs qpdf) instead of rebuilding"
     echo "                       the PDF from rasterised images"
-    echo "      --model <tiny|small|medium>"
-    echo "                       OCR model size: faster or more accurate (default: small)"
-    echo "      --no-save        Install the OCR engine for this run only, in the"
-    echo "                       temp dir, and delete it afterwards"
     echo "      --install-engine Install the OCR engine and its models, then exit"
     echo "                       (Homebrew does this at install time)"
     echo "  -k, --keep           Keep temporary files (debug mode)"
@@ -267,7 +259,7 @@ require_command() {
 
 # Language code (three letters, ISO 639-2, as copyable-pdf always took, or
 # PaddleOCR's own) -> PaddleOCR's, or nothing when no model reads it.
-paddle_lang_code() {
+engine_lang_code() {
     case "$1" in
         en|fr|es|de|it|pt|nl|pl|cs|da|sv|no|fi|ro|hu|tr|ca|hr|sk|sl|lt|lv|et|id|ms|vi|la|ga|cy|af|is|sq|eu|gl|mt|bs|az|uz|sw|tl|oc|lb) echo "$1" ;;
         ch|chinese_cht|japan|korean|ru|uk|be|bg|mk|rs_cyrillic|rs_latin|kk|mn|ar|fa|ur|hi|mr|ne|th|el|ta|te) echo "$1" ;;
@@ -297,26 +289,19 @@ paddle_lang_code() {
     esac
 }
 
-# Install the OCR engine (or find it installed) and set PADDLE_PY and
-# PADDLE_MODELS_DIR. Everything lives under one directory — the interpreter uv
-# fetches, the packages, the models — so deleting it removes every trace. It is
-# kept between runs; --no-save puts it in the run's temp dir instead.
-setup_paddle() {
-    local home where
-    if [ "$NO_SAVE" = true ]; then
-        home="$TEMP_DIR/ocr-engine"
-        where="a temporary folder, deleted after the run"
-    else
-        home="$PADDLE_SAVED_HOME"
-        where="$home"
-    fi
+# Install the OCR engine (or find it installed) and set ENGINE_PY and
+# ENGINE_MODELS_DIR. Everything lives under one directory, kept between runs —
+# the interpreter uv fetches, the packages, the models — so deleting it removes
+# every trace.
+setup_engine() {
+    local home="$ENGINE_HOME"
     export UV_PYTHON_INSTALL_DIR="$home/python" UV_NO_CACHE=1 UV_NO_PROGRESS=1
-    PADDLE_PY="$home/venv/bin/python"
-    PADDLE_MODELS_DIR="$home/models"
+    ENGINE_PY="$home/venv/bin/python"
+    ENGINE_MODELS_DIR="$home/models"
 
     local marker
-    marker="$home/venv/.copyable-pdf-$(echo "${PADDLE_PACKAGES[*]}" | tr ' =' '_-')"
-    if [ -x "$PADDLE_PY" ] && [ -f "$marker" ]; then
+    marker="$home/venv/.copyable-pdf-$(echo "${ENGINE_PACKAGES[*]}" | tr ' =' '_-')"
+    if [ -x "$ENGINE_PY" ] && [ -f "$marker" ]; then
         if [ "$VERBOSE" = true ]; then
             log_info "Using the OCR engine in $home"
         fi
@@ -327,9 +312,9 @@ setup_paddle() {
     mkdir -p "$home"
     # onnxruntime ships wheels for a handful of Python versions only, so ask uv
     # for 3.12 whatever the system Python is; uv downloads one if it has to.
-    spinner_start "Installing the OCR engine into $where (~300 MB, one-off)"
+    spinner_start "Installing the OCR engine into $home (~300 MB, one-off)"
     if ! { uv venv -q --python 3.12 "$home/venv" &&
-           uv pip install -q --python "$PADDLE_PY" "${PADDLE_PACKAGES[@]}"; } \
+           uv pip install -q --python "$ENGINE_PY" "${ENGINE_PACKAGES[@]}"; } \
             >"$TEMP_DIR/engine-install.log" 2>&1; then
         spinner_stop
         log_error "Could not install the OCR engine:"
@@ -339,13 +324,13 @@ setup_paddle() {
     fi
     touch "$marker"
     spinner_stop
-    log_success "OCR engine installed in $where."
+    log_success "OCR engine installed in $home."
 }
 
 # The OCR side, written out at run time: copyable-pdf installs as a single
 # file, so the helper travels inside it.
-write_paddle_helper() {
-    cat > "$1" <<'PADDLE_HELPER_EOF'
+write_engine_helper() {
+    cat > "$1" <<'ENGINE_HELPER_EOF'
 """Recognise page images with PaddleOCR's models and write one PDF per page.
 
 The models (PP-OCRv6, or PP-OCRv5 for scripts v6 does not read) run through
@@ -385,7 +370,7 @@ V5_SCRIPT = {
 }
 
 
-def load_ocr(langs, model, models_dir, threads=0):
+def load_ocr(langs, models_dir, threads=0):
     from rapidocr import LangRec, ModelType, OCRVersion, RapidOCR
 
     # Pages are shrunk to 2500 px on their long side before detection; at
@@ -400,11 +385,11 @@ def load_ocr(langs, model, models_dir, threads=0):
     if threads > 0:
         params["EngineConfig.onnxruntime.intra_op_num_threads"] = threads
     if all(lang in V6_LANGS for lang in langs):
-        # The tiny v6 model has no Japanese.
-        size = ModelType.SMALL if model == "tiny" and "japan" in langs else ModelType(model)
+        # small: medium read no better on any test page, at three times the
+        # time; tiny made mistakes.
         for part in ("Det", "Rec"):
             params[f"{part}.ocr_version"] = OCRVersion.PPOCRV6
-            params[f"{part}.model_type"] = size
+            params[f"{part}.model_type"] = ModelType.SMALL
     else:
         script = next(V5_SCRIPT[lang] for lang in langs if lang in V5_SCRIPT)
         if len({V5_SCRIPT.get(lang, "v6") for lang in langs}) > 1:
@@ -713,7 +698,6 @@ def write_page(img_path, out_path, lines, dpi, textonly, font, jpeg=False):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--lang", required=True, help="PaddleOCR codes, comma separated")
-    ap.add_argument("--model", default="small")
     ap.add_argument("--models-dir", default="")
     ap.add_argument("--threads", type=int, default=0,
                     help="CPU threads for ONNX Runtime (0: all of them)")
@@ -742,7 +726,7 @@ def main():
 
     try:
         with contextlib.redirect_stdout(sys.stderr):
-            ocr = load_ocr(args.lang.split(","), args.model, args.models_dir, args.threads)
+            ocr = load_ocr(args.lang.split(","), args.models_dir, args.threads)
     except Exception as exc:  # no network, bad model name, broken install...
         for img in args.images:
             fail(img, f"The OCR models could not load: {type(exc).__name__}: {exc}")
@@ -778,7 +762,7 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-PADDLE_HELPER_EOF
+ENGINE_HELPER_EOF
 }
 
 # --- Main Logic ---
@@ -837,33 +821,16 @@ while [[ $# -gt 0 ]]; do
             GEN_TEXT=true
             shift
             ;;
-        -m|--markdown)
-            GEN_MD=true
-            shift
-            ;;
         -p|--preserve)
             PRESERVE=true
             shift
             ;;
-        # Gone in 3.0 with Tesseract. Refused rather than ignored: a command that
-        # asked for them would otherwise silently get something else.
-        --tesseract|--plain|--tessdata-dir|-c|--clean)
-            log_error "$key was removed in copyable-pdf 3.0, along with Tesseract. The OCR engine (PaddleOCR's models) needs neither; drop the option."
+        # Gone in 3.0. Refused rather than ignored: a command that asked for
+        # them would otherwise silently get something else.
+        --tesseract|--plain|--tessdata-dir|-c|--clean|--paddle|--save-paddle|\
+        --model|--paddle-model|--no-save|-m|--markdown)
+            log_error "$key was removed in copyable-pdf 3.0; drop it. (For the text as a file, use -t.)"
             exit 2
-            ;;
-        # --paddle and --save-paddle are what 1.6 needed for what is now the
-        # only engine; still accepted, so existing commands keep working.
-        --paddle|--save-paddle)
-            shift
-            ;;
-        --model|--paddle-model)
-            require_value "$key" "$#"
-            PADDLE_MODEL="$2"
-            shift; shift
-            ;;
-        --no-save)
-            NO_SAVE=true
-            shift
             ;;
         --install-engine)
             INSTALL_ONLY=true
@@ -899,23 +866,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-case "$PADDLE_MODEL" in
-    tiny|small|medium) ;;
-    *) log_error "--model must be tiny, small or medium (got '$PADDLE_MODEL')."; exit 2 ;;
-esac
-
 # Install the engine and fetch its models now, so the first real run starts
 # straight away. The Homebrew formula calls this from post_install.
 if [ "$INSTALL_ONLY" = true ]; then
     require_command uv uv
     TEMP_DIR=$(mktemp -d)
     trap 'spinner_stop; rm -rf "$TEMP_DIR"' EXIT
-    NO_SAVE=false
-    setup_paddle
-    write_paddle_helper "$TEMP_DIR/ocr.py"
-    spinner_start "Downloading the OCR models ($PADDLE_MODEL)"
-    if ! "$PADDLE_PY" -W ignore "$TEMP_DIR/ocr.py" --warmup --lang en \
-            --model "$PADDLE_MODEL" --models-dir "$PADDLE_MODELS_DIR" \
+    setup_engine
+    write_engine_helper "$TEMP_DIR/ocr.py"
+    spinner_start "Downloading the OCR models"
+    if ! "$ENGINE_PY" -W ignore "$TEMP_DIR/ocr.py" --warmup --lang en \
+            --models-dir "$ENGINE_MODELS_DIR" \
             >/dev/null 2>"$TEMP_DIR/warmup.log"; then
         spinner_stop
         log_error "Could not download the OCR models:"
@@ -923,7 +884,7 @@ if [ "$INSTALL_ONLY" = true ]; then
         exit 1
     fi
     spinner_stop
-    log_success "OCR engine ready in $PADDLE_SAVED_HOME."
+    log_success "OCR engine ready in $ENGINE_HOME."
     exit 0
 fi
 
@@ -944,7 +905,6 @@ if [ -z "$INPUT_FILE" ]; then
     DPI=$(prompt_input "DPI Resolution" "$DEFAULT_DPI")
 
     if ask_yes_no "Generate text file (.txt)?"; then GEN_TEXT=true; fi
-    if ask_yes_no "Generate .md file (layout-preserved plain text)?"; then GEN_MD=true; fi
 
     # Optional Output. NOT `local` — this block runs at script scope, not inside
     # a function, where bash rejects `local` outright ("can only be used in a
@@ -1003,15 +963,15 @@ esac
 
 # PaddleOCR's models name languages their own way; translate now, so an
 # unsupported one fails here rather than after an install.
-PADDLE_LANGS=""
+ENGINE_LANGS=""
 IFS='+' read -ra REQ_LANGS <<< "$OCR_LANG"
 for lang in "${REQ_LANGS[@]}"; do
-    code="$(paddle_lang_code "$lang")"
+    code="$(engine_lang_code "$lang")"
     if [ -z "$code" ]; then
         log_error "No OCR model reads language '$lang'."
         exit 2
     fi
-    PADDLE_LANGS="${PADDLE_LANGS:+$PADDLE_LANGS,}$code"
+    ENGINE_LANGS="${ENGINE_LANGS:+$ENGINE_LANGS,}$code"
 done
 
 if [ -n "$JOBS" ]; then
@@ -1045,9 +1005,8 @@ if [ "$VERBOSE" = true ]; then
     echo "  DPI:       $DPI"
     echo "  Jobs:      $JOBS"
     echo "  Text:      $GEN_TEXT"
-    echo "  Markdown:  $GEN_MD"
     echo "  Preserve:  $PRESERVE"
-    echo "  Engine:    PaddleOCR models via RapidOCR ($PADDLE_MODEL, $PADDLE_LANGS)"
+    echo "  Engine:    PaddleOCR models via RapidOCR ($ENGINE_LANGS)"
     echo ""
 fi
 
@@ -1118,7 +1077,7 @@ if [ "$KEEP_TEMP" = true ]; then
     log_info "Temporary files will be kept at: $TEMP_DIR"
 fi
 
-setup_paddle
+setup_engine
 
 log_info "Step 1/3: Converting PDF to images ($DPI DPI)..."
 pdftoppm "$INPUT_FILE" "$TEMP_DIR/page" -png -r "$DPI"
@@ -1136,7 +1095,7 @@ if [ -n "$PDF_PAGES" ] && [ "$PAGE_COUNT" -ne "$PDF_PAGES" ]; then
 fi
 log_success "Generated $PAGE_COUNT pages."
 
-log_info "Step 2/3: OCR Processing ($OCR_LANG) with PaddleOCR models ($PADDLE_MODEL)..."
+log_info "Step 2/3: OCR Processing ($OCR_LANG)..."
 
 # Turn the workers' DONE / FAIL lines into the progress bar. The first line of
 # any kind also ends the spinner that covers PaddleOCR's model loading.
@@ -1158,17 +1117,17 @@ track_progress() {
     done
 }
 
-PADDLE_HELPER="$TEMP_DIR/paddle_ocr.py"
-write_paddle_helper "$PADDLE_HELPER"
-paddle_args=(--lang "$PADDLE_LANGS" --model "$PADDLE_MODEL" --dpi "$DPI" --models-dir "$PADDLE_MODELS_DIR")
+ENGINE_HELPER="$TEMP_DIR/ocr.py"
+write_engine_helper "$ENGINE_HELPER"
+engine_args=(--lang "$ENGINE_LANGS" --dpi "$DPI" --models-dir "$ENGINE_MODELS_DIR")
 if [ "$PRESERVE" = true ]; then
-    paddle_args+=(--textonly)
+    engine_args+=(--textonly)
 # Photos (every image in the source a JPEG) go back in as JPEG. pdfimages lists
 # each image with its encoding in the ninth column, after two header lines.
 elif command -v pdfimages >/dev/null 2>&1 &&
      pdfimages -list "$INPUT_FILE" 2>/dev/null | awk 'NR > 2 { n++; if ($9 != "jpeg" && $9 != "jpx") other = 1 }
                                                     END { exit !(n > 0 && !other) }'; then
-    paddle_args+=(--jpeg)
+    engine_args+=(--jpeg)
 fi
 spinner_start "Loading the OCR models"
 # `|| true`: a page that fails makes the helper exit non-zero, and under
@@ -1188,12 +1147,12 @@ run_workers() {
         for ((i = k; i < PAGE_COUNT; i += WORKERS)); do
             share+=("${PAGE_IMAGES[i]}")
         done
-        "$PADDLE_PY" -W ignore "$PADDLE_HELPER" "${paddle_args[@]}" --threads "$THREADS" \
+        "$ENGINE_PY" -W ignore "$ENGINE_HELPER" "${engine_args[@]}" --threads "$THREADS" \
             "${share[@]}" &
     done
     wait
 }
-run_workers 2>"$TEMP_DIR/paddle.log" | track_progress || true
+run_workers 2>"$TEMP_DIR/engine.log" | track_progress || true
 spinner_stop
 
 # Close the progress bar's line — but only if one was actually drawn.
@@ -1228,9 +1187,9 @@ if [ "$PAGE_COUNT_PDF" -ne "$PAGE_COUNT" ]; then
     done
     # A PaddleOCR process that died outright (out of memory, a crash in native
     # code) leaves no per-page reason, only its own log.
-    if [ "${#ERR_LIST[@]}" -eq 0 ] && [ -s "$TEMP_DIR/paddle.log" ]; then
+    if [ "${#ERR_LIST[@]}" -eq 0 ] && [ -s "$TEMP_DIR/engine.log" ]; then
         log_error "  The OCR engine stopped; last lines of its log:"
-        tail -n 5 "$TEMP_DIR/paddle.log" | while read -r l; do log_error "    $l"; done
+        tail -n 5 "$TEMP_DIR/engine.log" | while read -r l; do log_error "    $l"; done
     fi
     exit 1
 fi
@@ -1299,16 +1258,6 @@ if [ "$GEN_TEXT" = true ]; then
     log_info "Generating text file..."
     pdftotext "$OUTPUT_FILE" "$TXT_FILE"
     log_success "Text saved to: $TXT_FILE"
-fi
-
-if [ "$GEN_MD" = true ]; then
-    MD_FILE="$OUT_STEM.md"
-    log_info "Generating .md file (layout-preserved plain text)..."
-    # Not markdown: `pdftotext -layout` keeps the physical layout with spaces,
-    # it does not emit headings, lists or emphasis. The extension is a
-    # convenience for editors, and the help text now says so.
-    pdftotext -layout "$OUTPUT_FILE" "$MD_FILE"
-    log_success "Markdown saved to: $MD_FILE"
 fi
 
 echo ""

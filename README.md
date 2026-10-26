@@ -164,9 +164,15 @@ the same project as the `paddleocr` Python package and recognise the same, but
 without its 1 GB PaddlePaddle runtime, and several times faster on a CPU.
 
 -   **Installed once, kept.** The first run builds the engine with `uv` in
-    `~/.cache/copyable-pdf/ocr-engine`, and every later run reuses it.
-    `brew install` does this at install time. Delete that folder to remove
+    `~/.cache/copyable-pdf/ocr-engine` (`brew install` does it at install
+    time, in Homebrew's `var`), and every later run reuses it, offline. The
+    interpreter, the downloaded packages and the models are all kept there,
+    so even a rebuild downloads nothing again. Delete that folder to remove
     it.
+-   **Reproducible**: `rapidocr` and `onnxruntime` are pinned, and their
+    dependencies resolved as PyPI stood on a fixed date, so every install
+    gets the same tested versions and nothing published since. The models
+    are checked against their SHA-256 when downloaded.
 -   **One model size**: `small`. On the benchmark below, `medium` read no
     better at three times the time, and `tiny` made mistakes.
 -   **Languages**: Latin-script languages, English, Chinese and Japanese share

@@ -16,11 +16,15 @@ VERBOSE=false
 COLOR_SUPPORT=true
 GEN_TEXT=false
 PRESERVE=false
-# The OCR engine: PaddleOCR's PP-OCRv6 models, run by RapidOCR on ONNX Runtime.
 INSTALL_ONLY=false
-# Pinned: the helper below relies on this RapidOCR's results and model names,
-# and a pin change is what makes an installed engine get rebuilt.
+# The OCR engine: PaddleOCR's PP-OCRv6 models, run by RapidOCR on ONNX Runtime.
+# Pinned: the helper below relies on this RapidOCR's results and model names.
 ENGINE_PACKAGES=(rapidocr==3.10.0 onnxruntime==1.31.0)
+# Their dependencies (OpenCV, NumPy, Pillow…) are resolved as PyPI stood on this
+# date, so every install gets the same, already-tested versions, and a package
+# published after it, compromised or broken, can never be pulled in. Changing
+# either pin or the date is what makes an installed engine get rebuilt.
+ENGINE_RESOLVED_AT="2026-10-20T00:00:00Z"
 # Where the engine lives between runs. The Homebrew formula points this inside
 # its own prefix (COPYABLE_PDF_HOME), where `brew install` has already put it.
 ENGINE_HOME="${COPYABLE_PDF_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/copyable-pdf}/ocr-engine"
@@ -291,16 +295,18 @@ engine_lang_code() {
 
 # Install the OCR engine (or find it installed) and set ENGINE_PY and
 # ENGINE_MODELS_DIR. Everything lives under one directory, kept between runs —
-# the interpreter uv fetches, the packages, the models — so deleting it removes
-# every trace.
+# the interpreter uv fetches, the downloaded packages, the environment, the
+# models — so nothing is fetched twice, and deleting it removes every trace.
 setup_engine() {
     local home="$ENGINE_HOME"
-    export UV_PYTHON_INSTALL_DIR="$home/python" UV_NO_CACHE=1 UV_NO_PROGRESS=1
+    # uv's cache sits with the engine: rebuilding it, after a pin change,
+    # reuses what it already downloaded instead of fetching ~280 MB again.
+    export UV_PYTHON_INSTALL_DIR="$home/python" UV_CACHE_DIR="$home/uv-cache" UV_NO_PROGRESS=1
     ENGINE_PY="$home/venv/bin/python"
     ENGINE_MODELS_DIR="$home/models"
 
     local marker
-    marker="$home/venv/.copyable-pdf-$(echo "${ENGINE_PACKAGES[*]}" | tr ' =' '_-')"
+    marker="$home/venv/.copyable-pdf-$(echo "${ENGINE_PACKAGES[*]} $ENGINE_RESOLVED_AT" | tr ' =:' '___')"
     if [ -x "$ENGINE_PY" ] && [ -f "$marker" ]; then
         if [ "$VERBOSE" = true ]; then
             log_info "Using the OCR engine in $home"
@@ -314,7 +320,8 @@ setup_engine() {
     # for 3.12 whatever the system Python is; uv downloads one if it has to.
     spinner_start "Installing the OCR engine into $home (~300 MB, one-off)"
     if ! { uv venv -q --python 3.12 "$home/venv" &&
-           uv pip install -q --python "$ENGINE_PY" "${ENGINE_PACKAGES[@]}"; } \
+           uv pip install -q --python "$ENGINE_PY" --exclude-newer "$ENGINE_RESOLVED_AT" \
+               "${ENGINE_PACKAGES[@]}"; } \
             >"$TEMP_DIR/engine-install.log" 2>&1; then
         spinner_stop
         log_error "Could not install the OCR engine:"
@@ -1033,7 +1040,9 @@ fi
 # come after the dependency checks. A corrupt or password-protected PDF used to
 # get as far as pdftoppm and come back as a raw poppler error with a temp
 # directory already created.
-if ! PDF_INFO="$(pdfinfo "$INPUT_FILE" 2>&1)"; then
+# NULs are dropped: some producers leave them in metadata, and bash warns about
+# every one ("ignored null byte in input"). pipefail keeps pdfinfo's status.
+if ! PDF_INFO="$(pdfinfo "$INPUT_FILE" 2>&1 | tr -d '\0')"; then
     log_error "'$INPUT_FILE' is not a readable PDF (corrupt or encrypted)."
     log_error "  $(echo "$PDF_INFO" | tail -n 1)"
     exit 2

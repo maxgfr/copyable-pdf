@@ -20,13 +20,18 @@ PRESERVE=false
 CLEAN=false
 PLAIN=false
 TESSDATA_DIR=""
-PADDLE=false
+# The default engine: PaddleOCR's PP-OCRv6 models, run by RapidOCR on ONNX
+# Runtime. --tesseract switches to Tesseract.
+PADDLE=true
 PADDLE_MODEL="small"
-SAVE_PADDLE=false
-# Pinned: the helper below relies on this PaddleOCR's result fields, and a pin
-# change is what makes a saved install get rebuilt.
-PADDLE_PACKAGES=(paddlepaddle==3.3.1 paddleocr==3.7.0)
-PADDLE_SAVED_HOME="${XDG_CACHE_HOME:-$HOME/.cache}/copyable-pdf/paddle"
+NO_SAVE=false
+INSTALL_ONLY=false
+# Pinned: the helper below relies on this RapidOCR's results and model names,
+# and a pin change is what makes an installed engine get rebuilt.
+PADDLE_PACKAGES=(rapidocr==3.10.0 onnxruntime==1.31.0)
+# Where the engine lives between runs. The Homebrew formula points this inside
+# its own prefix (COPYABLE_PDF_HOME), where `brew install` has already put it.
+PADDLE_SAVED_HOME="${COPYABLE_PDF_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/copyable-pdf}/ocr-engine"
 
 # --- Colors ---
 if [ -t 1 ] && [ "$COLOR_SUPPORT" = true ]; then
@@ -177,20 +182,20 @@ print_usage() {
     echo "  -c, --clean          Straighten pages and flatten shadows before OCR"
     echo "                       (needs ImageMagick). The output shows the"
     echo "                       cleaned pages. Not with --preserve"
-    echo "      --plain          Skip automatic rotation and adaptive"
-    echo "                       thresholding (the pre-1.4 behaviour)"
+    echo "      --model <tiny|small|medium>"
+    echo "                       OCR model size: faster or more accurate (default: small)"
+    echo "      --no-save        Install the OCR engine for this run only, in the"
+    echo "                       temp dir, and delete it afterwards"
+    echo "      --install-engine Install the OCR engine and its models, then exit"
+    echo "                       (Homebrew does this at install time)"
+    echo "      --tesseract      Recognise with Tesseract instead of the default"
+    echo "                       engine (PaddleOCR's models): lighter, much weaker"
+    echo "                       on photos and poor scans"
+    echo "      --plain          With --tesseract: skip automatic rotation and"
+    echo "                       adaptive thresholding (the pre-1.4 behaviour)"
     echo "      --tessdata-dir <path>"
-    echo "                       Read language models from this directory"
-    echo "                       (e.g. a tessdata_best checkout)"
-    echo "      --paddle         Recognise with PaddleOCR instead of Tesseract:"
-    echo "                       better on poor scans and photos, slower. Installed"
-    echo "                       on first use into the temp dir (needs uv, ~1 GB)"
-    echo "                       and deleted after the run, unless --save-paddle"
-    echo "      --paddle-model <tiny|small|medium>"
-    echo "                       Model size: faster or more accurate (default: small)"
-    echo "      --save-paddle    Keep the PaddleOCR install in"
-    echo "                       ~/.cache/copyable-pdf/paddle and reuse it on every"
-    echo "                       later --paddle run (delete that folder to remove it)"
+    echo "                       With --tesseract: read language models from this"
+    echo "                       directory (e.g. a tessdata_best checkout)"
     echo "  -k, --keep           Keep temporary files (debug mode)"
     echo "  -v, --verbose        Verbose output"
     echo "  -h, --help           Show this help message"
@@ -201,8 +206,8 @@ print_usage() {
     echo "  copyable-pdf -l fra+eng -t document.pdf"
     echo "  copyable-pdf --jobs 8 -k document.pdf"
     echo "  copyable-pdf --preserve scan.pdf"
-    echo "  copyable-pdf --clean -l fra photo-of-a-page.pdf"
-    echo "  copyable-pdf --paddle --save-paddle -l spa poor-scan.pdf"
+    echo "  copyable-pdf -l spa -p -t photo-of-a-form.pdf"
+    echo "  copyable-pdf --tesseract --clean -l fra scan.pdf"
 }
 
 ask_yes_no() {
@@ -348,65 +353,71 @@ paddle_lang_code() {
         ara) echo ar ;;        fas) echo fa ;;        urd) echo ur ;;
         hin) echo hi ;;        mar) echo mr ;;        nep) echo ne ;;
         tha) echo th ;;        ell) echo el ;;        tam) echo ta ;;
-        tel) echo te ;;        kat) echo ka ;;
+        tel) echo te ;;
     esac
 }
 
-# Install PaddleOCR (or find it installed) and set PADDLE_PY. Everything lives
-# under one directory — the interpreter uv fetches, the packages, the models —
-# so deleting it removes every trace: the run's temp dir by default, or the
-# saved folder, which is reused whenever it exists.
+# Install the OCR engine (or find it installed) and set PADDLE_PY and
+# PADDLE_MODELS_DIR. Everything lives under one directory — the interpreter uv
+# fetches, the packages, the models — so deleting it removes every trace. It is
+# kept between runs; --no-save puts it in the run's temp dir instead.
 setup_paddle() {
     local home where
-    if [ "$SAVE_PADDLE" = true ] || [ -d "$PADDLE_SAVED_HOME/venv" ]; then
+    if [ "$NO_SAVE" = true ]; then
+        home="$TEMP_DIR/ocr-engine"
+        where="a temporary folder, deleted after the run"
+    else
         home="$PADDLE_SAVED_HOME"
         where="$home"
-    else
-        home="$TEMP_DIR/paddle"
-        where="a temporary folder, deleted after the run"
     fi
     export UV_PYTHON_INSTALL_DIR="$home/python" UV_NO_CACHE=1 UV_NO_PROGRESS=1
-    export PADDLE_PDX_CACHE_HOME="$home/models" PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
     PADDLE_PY="$home/venv/bin/python"
+    PADDLE_MODELS_DIR="$home/models"
 
     local marker
     marker="$home/venv/.copyable-pdf-$(echo "${PADDLE_PACKAGES[*]}" | tr ' =' '_-')"
     if [ -x "$PADDLE_PY" ] && [ -f "$marker" ]; then
-        log_info "Using PaddleOCR from $home"
+        if [ "$VERBOSE" = true ]; then
+            log_info "Using the OCR engine in $home"
+        fi
         return
     fi
 
     rm -rf "$home/venv"
     mkdir -p "$home"
-    # PaddlePaddle ships wheels for Python 3.9-3.13 only, so ask uv for 3.12
-    # whatever the system Python is; uv downloads one if it has to.
-    spinner_start "Installing PaddleOCR into $where (~1 GB, about a minute)"
+    # onnxruntime ships wheels for a handful of Python versions only, so ask uv
+    # for 3.12 whatever the system Python is; uv downloads one if it has to.
+    spinner_start "Installing the OCR engine into $where (~300 MB, one-off)"
     if ! { uv venv -q --python 3.12 "$home/venv" &&
            uv pip install -q --python "$PADDLE_PY" "${PADDLE_PACKAGES[@]}"; } \
-            >"$TEMP_DIR/paddle-install.log" 2>&1; then
+            >"$TEMP_DIR/engine-install.log" 2>&1; then
         spinner_stop
-        log_error "Could not install PaddleOCR:"
-        tail -n 5 "$TEMP_DIR/paddle-install.log" | while read -r l; do log_error "  $l"; done
+        log_error "Could not install the OCR engine:"
+        tail -n 5 "$TEMP_DIR/engine-install.log" | while read -r l; do log_error "  $l"; done
         rm -rf "$home/venv"
         exit 1
     fi
     touch "$marker"
     spinner_stop
-    log_success "PaddleOCR installed in $where."
+    log_success "OCR engine installed in $where."
 }
 
-# The PaddleOCR side, written out at run time: copyable-pdf installs as a
-# single file, so the helper travels inside it.
+# The OCR side, written out at run time: copyable-pdf installs as a single
+# file, so the helper travels inside it.
 write_paddle_helper() {
     cat > "$1" <<'PADDLE_HELPER_EOF'
-"""Recognise page images with PaddleOCR and write one PDF per page.
+"""Recognise page images with PaddleOCR's models and write one PDF per page.
+
+The models (PP-OCRv6, or PP-OCRv5 for scripts v6 does not read) run through
+RapidOCR on ONNX Runtime: the same recognition as the PaddleOCR package, at a
+fraction of its size and several times its speed on a CPU.
 
 Each page-N.png becomes page-N.pdf, built the way tesseract builds its own:
 the page image (unless --textonly) under an invisible text layer in a
 glyphless CID font, so the rest of copyable-pdf merges and stamps the result
 exactly as it does tesseract's. On stdout, one line per page: DONE, or
 FAIL <name> with the reason in page-N.err. READY once the models are loaded.
-Everything PaddleOCR prints goes to stderr, so stdout carries only that.
+Everything else goes to stderr, so stdout carries only that.
 """
 import argparse
 import contextlib
@@ -415,48 +426,96 @@ import os
 import sys
 import zlib
 
-# Languages the PP-OCRv6 models read, all with the same multilingual model.
-V6_LANGS = {"ch", "chinese_cht", "en", "japan"}
+# One multilingual PP-OCRv6 model reads all of these.
+V6_LANGS = {
+    "ch", "chinese_cht", "en", "japan", "af", "az", "bs", "ca", "cs", "cy",
+    "da", "de", "es", "et", "eu", "fi", "fr", "ga", "gl", "hr", "hu", "id",
+    "is", "it", "ku", "la", "lb", "lt", "lv", "mi", "ms", "mt", "nl", "no",
+    "oc", "pl", "pt", "qu", "rm", "ro", "rs_latin", "sk", "sl", "sq", "sv",
+    "sw", "tl", "tr", "uz", "vi",
+}
+# Everything else has one PP-OCRv5 model per script.
+V5_SCRIPT = {
+    "ru": "eslav", "uk": "eslav", "be": "eslav",
+    "bg": "cyrillic", "mk": "cyrillic", "rs_cyrillic": "cyrillic",
+    "kk": "cyrillic", "mn": "cyrillic",
+    "ar": "arabic", "fa": "arabic", "ur": "arabic",
+    "hi": "devanagari", "mr": "devanagari", "ne": "devanagari",
+    "korean": "korean", "th": "th", "el": "el", "ta": "ta", "te": "te",
+}
 
 
-def v6_langs():
-    try:
-        from paddleocr._utils.langs import LATIN_LANGS
-    except ImportError:
-        LATIN_LANGS = {"fr", "es", "de", "it", "pt", "nl", "pl", "cs", "da",
-                       "sv", "no", "fi", "ro", "hu", "tr", "ca", "hr", "sk",
-                       "sl", "lt", "lv", "et", "id", "ms", "vi", "la", "ga",
-                       "cy", "af", "is", "sq"}
-    return V6_LANGS | (set(LATIN_LANGS) - {"pi"})
+def load_ocr(langs, model, models_dir):
+    from rapidocr import LangRec, ModelType, OCRVersion, RapidOCR
+
+    params = {"Global.log_level": "error"}
+    if models_dir:
+        os.makedirs(models_dir, exist_ok=True)
+        params["Global.model_root_dir"] = models_dir
+    if all(lang in V6_LANGS for lang in langs):
+        # The tiny v6 model has no Japanese.
+        size = ModelType.SMALL if model == "tiny" and "japan" in langs else ModelType(model)
+        for part in ("Det", "Rec"):
+            params[f"{part}.ocr_version"] = OCRVersion.PPOCRV6
+            params[f"{part}.model_type"] = size
+    else:
+        script = next(V5_SCRIPT[lang] for lang in langs if lang in V5_SCRIPT)
+        if len({V5_SCRIPT.get(lang, "v6") for lang in langs}) > 1:
+            print(f"These languages need different models; reading '{script}'.",
+                  file=sys.stderr)
+        for part in ("Det", "Rec"):
+            params[f"{part}.ocr_version"] = OCRVersion.PPOCRV5
+            params[f"{part}.model_type"] = ModelType.MOBILE
+        params["Rec.lang_type"] = LangRec(script)
+    return RapidOCR(params=params)
 
 
-def load_ocr(langs, model):
-    from paddleocr import PaddleOCR
+# Each rotation to try, and how a point (u, v) in the rotated image maps back
+# to the page (w, h: the page's size). A line read in a rotated frame comes
+# back with its corners in reading order, which is what write_page wants.
+def rotations():
+    import cv2
 
-    # Page-level orientation is left to the text lines: the page classifier
-    # turned an upright page with a shadow upside down, and it reports boxes in
-    # the rotated frame. Text-line orientation reads upside-down lines just as
-    # well, in the page's own coordinates, which --preserve needs.
-    # No oneDNN: on x86 CPUs PaddlePaddle 3.3 runs these models through it and
-    # fails ("ConvertPirAttribute2RuntimeAttribute not support"). Apple Silicon
-    # never uses it, so only Intel/AMD machines lose some speed.
-    common = dict(
-        use_doc_orientation_classify=False,
-        use_doc_unwarping=False,
-        use_textline_orientation=True,
-        enable_mkldnn=False,
-    )
-    if all(lang in v6_langs() for lang in langs):
-        return PaddleOCR(
-            text_detection_model_name=f"PP-OCRv6_{model}_det",
-            text_recognition_model_name=f"PP-OCRv6_{model}_rec",
-            **common,
-        )
-    # Other scripts have one model per language, so a mix cannot be honoured.
-    if len(langs) > 1:
-        print(f"PaddleOCR reads one script at a time; using '{langs[0]}'.",
-              file=sys.stderr)
-    return PaddleOCR(lang=langs[0], **common)
+    return [
+        (None, lambda u, v, w, h: (u, v)),
+        (cv2.ROTATE_180, lambda u, v, w, h: (w - u, h - v)),
+        (cv2.ROTATE_90_CLOCKWISE, lambda u, v, w, h: (v, h - u)),
+        (cv2.ROTATE_90_COUNTERCLOCKWISE, lambda u, v, w, h: (w - v, u)),
+    ]
+
+
+def recognise(ocr, img_path):
+    """Lines as (text, corners in reading order), whatever way up the page is.
+
+    The page is read as it is first; only if that reads poorly is it read
+    turned round and on each side, keeping the reading that recognised the
+    most text with the most confidence. An upright page costs one pass.
+
+    Only lines lying flat count: a page on its side still gets read, line by
+    line stood upright, but with every box standing on end its text layer
+    comes out as words run together. Turned a quarter, the same lines lie
+    flat and win.
+    """
+    import cv2
+
+    img = cv2.imread(img_path)
+    h, w = img.shape[:2]
+    best = None
+    for code, back in rotations():
+        out = ocr(img if code is None else cv2.rotate(img, code))
+        txts = [str(t) for t in (out.txts or ())]
+        scores = [float(s) for s in (out.scores or ())]
+        boxes = [] if out.boxes is None else out.boxes.tolist()
+        flat = [math.dist(b[0], b[1]) >= math.dist(b[0], b[3]) for b in boxes]
+        weight = sum(s * len(t) for t, s, f in zip(txts, scores, flat) if f)
+        if best is None or weight > best[0]:
+            best = (weight, txts, boxes, back)
+        confident = [s for s, f in zip(scores, flat) if f]
+        if best[0] == weight and confident and len(confident) * 2 > len(boxes) \
+                and sum(confident) / len(confident) >= 0.9:
+            break
+    _, txts, boxes, back = best
+    return [(t, [back(x, y, w, h) for x, y in box]) for t, box in zip(txts, boxes)]
 
 
 def tounicode_cmap():
@@ -496,15 +555,14 @@ def write_page(img_path, out_path, lines, dpi, textonly, font):
     if not textonly:
         ops.append(b"q %.2f 0 0 %.2f 0 0 cm /Im0 Do Q" % (pw, ph))
     ops.append(b"BT 3 Tr")
-    for text, poly, flipped in lines:
+    for text, poly in lines:
         if not text:
             continue
-        # The polygon runs top-left, top-right, bottom-right, bottom-left in
-        # image pixels (y down). Convert to PDF points (y up).
+        # The corners come in reading order: start and end of the top edge,
+        # then end and start of the baseline, in image pixels (y down).
+        # Convert to PDF points (y up).
         tl, tr, br, bl = [(x * scale, ph - y * scale) for x, y in poly]
-        # Upside-down line: it reads from the image's top-right corner leftwards,
-        # with its baseline along the top edge.
-        origin, end, top = (tr, tl, br) if flipped else (bl, br, tl)
+        origin, end, top = bl, br, tl
         dx, dy = end[0] - origin[0], end[1] - origin[1]
         length = math.hypot(dx, dy)
         size = math.hypot(top[0] - origin[0], top[1] - origin[1])
@@ -585,10 +643,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--lang", required=True, help="PaddleOCR codes, comma separated")
     ap.add_argument("--model", default="small")
-    ap.add_argument("--dpi", type=float, required=True)
+    ap.add_argument("--models-dir", default="")
+    ap.add_argument("--warmup", action="store_true",
+                    help="load (downloading if needed) the models, then exit")
+    ap.add_argument("--dpi", type=float, default=300)
     ap.add_argument("--textonly", action="store_true")
     ap.add_argument("--font", default="")
-    ap.add_argument("images", nargs="+")
+    ap.add_argument("images", nargs="*")
     args = ap.parse_args()
 
     out = sys.stdout
@@ -610,29 +671,22 @@ def main():
 
     try:
         with contextlib.redirect_stdout(sys.stderr):
-            ocr = load_ocr(args.lang.split(","), args.model)
+            ocr = load_ocr(args.lang.split(","), args.model, args.models_dir)
     except Exception as exc:  # no network, bad model name, broken install...
         for img in args.images:
-            fail(img, f"PaddleOCR could not start: {type(exc).__name__}: {exc}")
+            fail(img, f"The OCR models could not load: {type(exc).__name__}: {exc}")
+        if args.warmup:
+            print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     report("READY")
+    if args.warmup:
+        return 0
 
     status = 0
     for img in args.images:
         try:
             with contextlib.redirect_stdout(sys.stderr):
-                res = ocr.predict(img)[0]
-            # Orientation is reported per detected line, recognised or not, so
-            # match it back to the recognised lines by their polygon.
-            angle_of = {
-                tuple(map(tuple, poly.tolist())): angle
-                for poly, angle in zip(res["dt_polys"],
-                                       res.get("textline_orientation_angles", []))
-            }
-            lines = []
-            for text, poly in zip(res["rec_texts"], res["rec_polys"]):
-                points = [tuple(p) for p in poly.tolist()]
-                lines.append((str(text), points, angle_of.get(tuple(points)) == 1))
+                lines = recognise(ocr, img)
             write_page(img, os.path.splitext(img)[0] + ".pdf", lines,
                        args.dpi, args.textonly, font)
             report("DONE")
@@ -724,20 +778,27 @@ while [[ $# -gt 0 ]]; do
             TESSDATA_DIR="$2"
             shift; shift
             ;;
-        --paddle)
+        --tesseract)
+            PADDLE=false
+            shift
+            ;;
+        # --paddle and --save-paddle are what 1.6 needed for what is now the
+        # default; still accepted, so existing commands keep working.
+        --paddle|--save-paddle)
             PADDLE=true
             shift
             ;;
-        # Both only mean something with PaddleOCR, so either one asks for it.
-        --paddle-model)
+        --model|--paddle-model)
             require_value "$key" "$#"
-            PADDLE=true
             PADDLE_MODEL="$2"
             shift; shift
             ;;
-        --save-paddle)
-            PADDLE=true
-            SAVE_PADDLE=true
+        --no-save)
+            NO_SAVE=true
+            shift
+            ;;
+        --install-engine)
+            INSTALL_ONLY=true
             shift
             ;;
         -k|--keep)
@@ -769,6 +830,34 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+case "$PADDLE_MODEL" in
+    tiny|small|medium) ;;
+    *) log_error "--model must be tiny, small or medium (got '$PADDLE_MODEL')."; exit 2 ;;
+esac
+
+# Install the engine and fetch its models now, so the first real run starts
+# straight away. The Homebrew formula calls this from post_install.
+if [ "$INSTALL_ONLY" = true ]; then
+    require_command uv uv
+    TEMP_DIR=$(mktemp -d)
+    trap 'spinner_stop; rm -rf "$TEMP_DIR"' EXIT
+    NO_SAVE=false
+    setup_paddle
+    write_paddle_helper "$TEMP_DIR/ocr.py"
+    spinner_start "Downloading the OCR models ($PADDLE_MODEL)"
+    if ! "$PADDLE_PY" -W ignore "$TEMP_DIR/ocr.py" --warmup --lang en \
+            --model "$PADDLE_MODEL" --models-dir "$PADDLE_MODELS_DIR" \
+            >/dev/null 2>"$TEMP_DIR/warmup.log"; then
+        spinner_stop
+        log_error "Could not download the OCR models:"
+        tail -n 5 "$TEMP_DIR/warmup.log" | while read -r l; do log_error "  $l"; done
+        exit 1
+    fi
+    spinner_stop
+    log_success "OCR engine ready in $PADDLE_SAVED_HOME."
+    exit 0
+fi
 
 # 2. Interactive Mode (if no input file)
 if [ -z "$INPUT_FILE" ]; then
@@ -857,25 +946,21 @@ if [ -n "$TESSDATA_DIR" ] && [ ! -d "$TESSDATA_DIR" ]; then
     exit 2
 fi
 
-# PaddleOCR names languages its own way; translate now, so an unsupported one
-# fails here rather than after a 1 GB install.
+# PaddleOCR's models name languages their own way; translate now, so an
+# unsupported one fails here rather than after an install.
 PADDLE_LANGS=""
 if [ "$PADDLE" = true ]; then
-    case "$PADDLE_MODEL" in
-        tiny|small|medium) ;;
-        *) log_error "--paddle-model must be tiny, small or medium (got '$PADDLE_MODEL')."; exit 2 ;;
-    esac
     IFS='+' read -ra TESS_LANGS <<< "$OCR_LANG"
     for lang in "${TESS_LANGS[@]}"; do
         code="$(paddle_lang_code "$lang")"
         if [ -z "$code" ]; then
-            log_error "PaddleOCR has no model for language '$lang'. Drop --paddle to use Tesseract."
+            log_error "The default OCR engine has no model for language '$lang'. Add --tesseract to use Tesseract."
             exit 2
         fi
         PADDLE_LANGS="${PADDLE_LANGS:+$PADDLE_LANGS,}$code"
     done
     if [ "$PLAIN" = true ] || [ -n "$TESSDATA_DIR" ]; then
-        log_warn "--plain and --tessdata-dir are Tesseract settings; --paddle ignores them."
+        log_warn "--plain and --tessdata-dir are Tesseract settings; add --tesseract to use them."
     fi
 fi
 
@@ -911,7 +996,7 @@ if [ "$VERBOSE" = true ]; then
     echo "  Clean:     $CLEAN"
     echo "  Plain:     $PLAIN"
     if [ "$PADDLE" = true ]; then
-        echo "  Engine:    PaddleOCR ($PADDLE_MODEL, $PADDLE_LANGS)"
+        echo "  Engine:    PaddleOCR models via RapidOCR ($PADDLE_MODEL, $PADDLE_LANGS)"
     else
         echo "  Engine:    Tesseract"
     fi
@@ -923,7 +1008,8 @@ fi
 
 # 4. Dependency Checks
 log_info "Checking dependencies..."
-# --paddle needs no tesseract at all: only uv, to build PaddleOCR's environment.
+# The default engine needs no tesseract at all: only uv, to build its
+# environment. Tesseract, when installed, still lends its glyphless font.
 if [ "$PADDLE" = true ]; then
     require_command uv uv
 else
@@ -1050,7 +1136,7 @@ fi
 log_success "Generated $PAGE_COUNT pages."
 
 if [ "$PADDLE" = true ]; then
-    log_info "Step 2/3: OCR Processing ($OCR_LANG) with PaddleOCR..."
+    log_info "Step 2/3: OCR Processing ($OCR_LANG) with PaddleOCR models ($PADDLE_MODEL)..."
 else
     log_info "Step 2/3: OCR Processing ($OCR_LANG) with $JOBS jobs..."
 fi
@@ -1197,7 +1283,7 @@ if [ "$PADDLE" = true ]; then
 
     PADDLE_HELPER="$TEMP_DIR/paddle_ocr.py"
     write_paddle_helper "$PADDLE_HELPER"
-    paddle_args=(--lang "$PADDLE_LANGS" --model "$PADDLE_MODEL" --dpi "$DPI")
+    paddle_args=(--lang "$PADDLE_LANGS" --model "$PADDLE_MODEL" --dpi "$DPI" --models-dir "$PADDLE_MODELS_DIR")
     if [ "$PRESERVE" = true ]; then
         paddle_args+=(--textonly)
     fi
@@ -1209,7 +1295,7 @@ if [ "$PADDLE" = true ]; then
             paddle_args+=(--font "${TESS_DATA%/}/pdf.ttf")
         fi
     fi
-    spinner_start "Loading PaddleOCR models ($PADDLE_MODEL)"
+    spinner_start "Loading the OCR models"
     "$PADDLE_PY" -W ignore "$PADDLE_HELPER" "${paddle_args[@]}" "${PAGE_IMAGES[@]}" \
         2>"$TEMP_DIR/paddle.log" | track_progress || true
     spinner_stop
@@ -1252,7 +1338,7 @@ if [ "$PAGE_COUNT_PDF" -ne "$PAGE_COUNT" ]; then
     # A PaddleOCR process that died outright (out of memory, a crash in native
     # code) leaves no per-page reason, only its own log.
     if [ "$PADDLE" = true ] && [ "${#ERR_LIST[@]}" -eq 0 ] && [ -s "$TEMP_DIR/paddle.log" ]; then
-        log_error "  PaddleOCR stopped; last lines of its log:"
+        log_error "  The OCR engine stopped; last lines of its log:"
         tail -n 5 "$TEMP_DIR/paddle.log" | while read -r l; do log_error "    $l"; done
     fi
     exit 1

@@ -1,24 +1,25 @@
 # copyable-pdf
 
-> A lightweight, dependency-minimal bash script to convert scanned PDFs into searchable PDFs using Tesseract OCR.
+> A bash script that turns scanned PDFs and phone photos of documents into searchable, copyable PDFs, with PaddleOCR's models (or Tesseract) running locally.
 
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-`copyable-pdf` takes a PDF input, converts each page to an image, performs OCR (Optical Character Recognition) using Tesseract, and merges them back into a single, searchable PDF document.
+`copyable-pdf` takes a PDF input, converts each page to an image, recognises the text on it (OCR), and merges everything back into a single, searchable PDF document. Nothing leaves your machine.
 
 ## Features
 
 -   **OCR**: Make scanned documents searchable and copyable.
+-   **Strong recognition by default**: PaddleOCR's PP-OCRv6 models, run by
+    [RapidOCR](https://github.com/RapidAI/RapidOCR) on ONNX Runtime. They read
+    phone photos, crooked, faded or noisy scans that Tesseract misses, about a
+    page a second on a laptop CPU. Tesseract remains available with
+    `--tesseract`.
 -   **Preserve mode**: Keep the original pages untouched and add an invisible
     text layer on top, instead of rebuilding the PDF from images.
--   **Better recognition out of the box**: Upside-down pages are turned
-    automatically, and shadows or yellowed corners no longer hide the text in
-    them.
+-   **Any way up**: Upside-down and sideways pages are turned automatically,
+    and shadows or yellowed corners no longer hide the text in them.
 -   **Clean mode**: Straighten crooked scans and flatten uneven lighting before
     OCR.
--   **PaddleOCR engine**: For the hardest scans, recognise with PaddleOCR
-    instead of Tesseract. It is installed on demand and deleted afterwards,
-    unless you choose to keep it.
 -   **Parallel Processing**: Uses multiple cores for faster OCR.
 -   **Text sidecars**: Also write the recognised text as `.txt` or `.md`.
 -   **Interactive mode**: Run it with no arguments and it asks for each setting.
@@ -33,6 +34,9 @@
 ```bash
 brew install maxgfr/tap/copyable-pdf
 ```
+
+This installs everything: the OCR engine and its models, Tesseract with every
+language, qpdf and ImageMagick. The first run starts straight away.
 
 ### As an agent skill
 
@@ -66,27 +70,29 @@ install the CLI as well.
 ### Dependencies
 
 Ensure you have the following installed:
--   **tesseract**: For OCR.
 -   **poppler**: For `pdftoppm`, `pdfunite`, `pdfinfo` and `pdftotext`.
+-   **uv**: Builds the OCR engine's environment on first use (about 300 MB,
+    kept in `~/.cache/copyable-pdf/ocr-engine`).
+-   **tesseract** (optional): Only needed for `--tesseract`. When present, its
+    glyphless font is also used for the invisible text.
 -   **qpdf** (optional): Only needed for `--preserve`.
 -   **ImageMagick** (optional): Only needed for `--clean`.
--   **uv** (optional): Only needed for `--paddle`, to build PaddleOCR's
-    environment.
 
 On macOS (Homebrew):
 ```bash
-brew install tesseract poppler
+brew install poppler uv
+brew install tesseract       # optional, for --tesseract
 brew install qpdf            # optional, for --preserve
 brew install imagemagick     # optional, for --clean
-brew install uv              # optional, for --paddle
 ```
 
 On Ubuntu/Debian:
 ```bash
-sudo apt-get install tesseract-ocr poppler-utils
-sudo apt-get install qpdf    # optional, for --preserve
-sudo apt-get install imagemagick  # optional, for --clean
-curl -LsSf https://astral.sh/uv/install.sh | sh  # optional, for --paddle
+sudo apt-get install poppler-utils
+curl -LsSf https://astral.sh/uv/install.sh | sh
+sudo apt-get install tesseract-ocr     # optional, for --tesseract
+sudo apt-get install qpdf              # optional, for --preserve
+sudo apt-get install imagemagick       # optional, for --clean
 ```
 
 ## Usage
@@ -100,12 +106,11 @@ the language, the DPI, the sidecars and the output name in turn.
 
 ### How it works
 
-1.  Every page is rendered to an image at the chosen DPI, and Tesseract
-    recognises the text on it, several pages at a time. Tesseract first detects
-    each page's orientation, so a page scanned upside down is read the right
-    way up, and it thresholds each region of the page on its own (Sauvola), so
-    a shadow does not blacken the text under it. With `--clean`, each page is
-    also straightened and its lighting evened out before that.
+1.  Every page is rendered to an image at the chosen DPI, and the OCR engine
+    finds and reads every line of text on it. A page that reads poorly as it
+    is gets read turned round and on each side too, and the best reading wins,
+    so upside-down and sideways pages come out right. With `--clean`, each page
+    is also straightened and its lighting evened out first.
 2.  By default those recognised pages are merged into a **new** PDF. The result
     is searchable everywhere, but it is a re-encoded copy of the original.
 3.  With `--preserve`, only the recognised text is kept and stamped onto the
@@ -126,11 +131,12 @@ handing back a document that is quietly missing pages.
 | `-m, --markdown` | Generate an additional .md file (layout-preserved plain text) | `false` |
 | `-p, --preserve` | Keep the original pages, add an invisible text layer on top (needs `qpdf`) | `false` |
 | `-c, --clean` | Straighten pages and flatten shadows before OCR (needs ImageMagick). The cleaned page is what the output shows. Not with `--preserve` | `false` |
-| `--plain` | Skip automatic rotation and adaptive thresholding (the pre-1.4 behaviour) | `false` |
-| `--paddle` | Recognise with PaddleOCR instead of Tesseract (needs `uv`). See [PaddleOCR engine](#paddleocr-engine) | `false` |
-| `--paddle-model <size>` | PaddleOCR model: `tiny`, `small` or `medium` | `small` |
-| `--save-paddle` | Keep the PaddleOCR install in `~/.cache/copyable-pdf/paddle` and reuse it | `false` |
-| `--tessdata-dir <path>` | Read language models from this directory, e.g. a [`tessdata_best`](https://github.com/tesseract-ocr/tessdata_best) checkout | system tessdata |
+| `--model <size>` | OCR model: `tiny` (fastest), `small` or `medium` (most accurate) | `small` |
+| `--no-save` | Install the OCR engine for this run only, in the temp dir, and delete it afterwards | `false` |
+| `--install-engine` | Install the OCR engine and its models, then exit (`brew install` does this for you) | - |
+| `--tesseract` | Recognise with Tesseract instead. See [Tesseract](#tesseract) | `false` |
+| `--plain` | With `--tesseract`: skip automatic rotation and adaptive thresholding | `false` |
+| `--tessdata-dir <path>` | With `--tesseract`: read language models from this directory, e.g. a [`tessdata_best`](https://github.com/tesseract-ocr/tessdata_best) checkout | system tessdata |
 | `-k, --keep` | Keep temporary files (debug) | `false` |
 | `-v, --verbose` | Verbose output | `false` |
 | `-h, --help` | Show help message | - |
@@ -165,53 +171,65 @@ copyable-pdf --clean -l fra photo.pdf
 
 ## Getting the best results
 
--   **Set the right language.** It matters more than any other setting. Use
-    `-l fra`, or `-l fra+eng` for mixed documents. A missing pack is offered for
-    install.
--   **Use `--clean` on poor scans**: crooked pages, phone photos, shadows near
-    the spine, grey or noisy backgrounds. It changes how the output looks, so
-    leave it off for scans that are already clean, and it cannot be combined
-    with `--preserve`, because a straightened page no longer lines up with the
-    original.
+-   **Set the right language**: `-l fra`, `-l spa`, or `-l fra+eng` for mixed
+    documents.
+-   **Use `--preserve` for photos.** Without it every page is rebuilt from a
+    300 DPI rendering, and a 3 MB PDF of phone photos can come out at 90 MB.
+    With it the original images are kept and only the text is added.
 -   **Raise the DPI for small print.** 300 suits most documents; try 400 for
     footnotes or dense tables.
--   **Try the `tessdata_best` models** if accuracy still falls short. Download
-    the `.traineddata` files you need into one directory and pass it with
-    `--tessdata-dir`. They are several times slower and not always better, so
-    compare them on your own documents.
--   **Fall back to `--plain`** if automatic rotation ever misreads a page with
-    very little text on it.
--   **Switch to `--paddle`** when Tesseract still misses text: phone photos,
-    faded or noisy scans, unusual fonts.
+-   **`--model medium`** when every character counts and time does not.
+-   **With `--tesseract`**: `--clean` helps a lot on crooked and shadowed
+    scans (it changes how the output looks, and cannot be combined with
+    `--preserve`); the `tessdata_best` models (`--tessdata-dir`) are slower and
+    not always better; fall back to `--plain` if automatic rotation ever
+    misreads a page with very little text on it.
 
-## PaddleOCR engine
+## OCR engine
 
-`--paddle` recognises the pages with [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)
-instead of Tesseract. Its neural models read poor scans and photos that
-Tesseract misses: on a crooked, blurred and noisy test page, Tesseract finds
-nothing and PaddleOCR reads every line.
+By default the text is recognised by PaddleOCR's PP-OCRv6 models (PP-OCRv5 for
+Cyrillic, Arabic, Korean and other scripts v6 does not read), run by
+[RapidOCR](https://github.com/RapidAI/RapidOCR) on ONNX Runtime. They come from
+the same project as the `paddleocr` Python package and recognise the same, but
+without its 1 GB PaddlePaddle runtime, and several times faster on a CPU.
 
-```bash
-copyable-pdf --paddle scan.pdf                 # install, OCR, delete the install
-copyable-pdf --save-paddle -l spa scan.pdf     # keep it for next time
-```
-
--   **Nothing to install by hand except `uv`.** The first run downloads
-    PaddleOCR, a compatible Python and the models, about 1 GB, in about a
-    minute. A spinner shows progress while it does.
--   **Temporary by default.** Everything goes into the run's temporary
-    directory and is deleted when the run ends.
--   **`--save-paddle` keeps it** in `~/.cache/copyable-pdf/paddle`. Every
-    later `--paddle` run reuses it and starts in seconds. Delete that folder to
-    remove it.
--   **Slower than Tesseract**: a few seconds per page with the default `small`
-    model. `--paddle-model tiny` is faster, and `medium` is more accurate but
-    several times slower.
+-   **Installed once, kept.** The first run builds the engine with `uv`
+    (about 300 MB with its models, under a minute) in
+    `~/.cache/copyable-pdf/ocr-engine`, and every later run reuses it.
+    `brew install` does this at install time. Delete that folder to remove it,
+    or pass `--no-save` to install for one run and delete it afterwards.
+-   **Fast**: about a second a page with the default `small` model on a laptop
+    CPU. `--model tiny` is faster, `--model medium` more accurate and slower.
 -   **Languages**: the same `-l` codes as Tesseract. Latin-script languages,
     English, Chinese and Japanese share one model, so `-l fra+eng` works. Other
-    scripts (Cyrillic, Arabic, Korean…) take one language at a time.
--   Works with `--preserve`, `--clean`, `-t` and `-m`. `--plain` and
-    `--tessdata-dir` are Tesseract settings and are ignored.
+    scripts take one language at a time.
+-   **Private**: models are downloaded once; pages and text never leave your
+    machine.
+
+On a phone photo of a Spanish form (perspective, dark background, BORRADOR
+watermark, JPEG; 2 pages, 21 printed labels each), on an Apple Silicon laptop:
+
+| Engine | Labels read | Time |
+| :--- | :--- | :--- |
+| Default (`small`) | 100% | 11 s |
+| Default, `--model medium` | 100% | 33 s |
+| `paddleocr` package, small (1.6's `--paddle`) | 98% | 22 s |
+| `--tesseract` | 48% | 9 s |
+
+Why not a larger model? The document AI models at the top of 2026's benchmarks
+(PaddleOCR-VL, GLM-OCR, MinerU, DeepSeek-OCR) are built for GPUs, are slow on a
+CPU, and return text without the position of each line, which a searchable PDF
+needs. PP-OCRv6 is the strongest engine that runs well on any machine and says
+where every line is.
+
+## Tesseract
+
+`--tesseract` recognises with [Tesseract](https://github.com/tesseract-ocr/tesseract)
+instead: no Python environment, but much weaker on photos and poor scans. It
+detects page orientation and thresholds each region on its own (Sauvola) by
+default; `--plain` turns both off. `--clean` helps it most on crooked and
+shadowed scans, and `--tessdata-dir` points it at other models such as
+`tessdata_best`.
 
 ## Preserve mode
 

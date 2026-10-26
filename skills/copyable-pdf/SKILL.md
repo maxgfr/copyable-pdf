@@ -1,14 +1,13 @@
 ---
 name: copyable-pdf
-description: Make scanned PDFs and phone photos of documents searchable and copyable with the `copyable-pdf` CLI (local OCR with PaddleOCR's models, or Tesseract), or extract their text as .txt. Use when a PDF is a scan or photo with no selectable text, when the user wants to OCR a PDF, search or copy text from a scanned document, read the text of an image-only PDF, or fix an upside-down, crooked or shadowed scan.
+description: Make scanned PDFs and phone photos of documents searchable and copyable with the `copyable-pdf` CLI (local OCR with PaddleOCR's models), or extract their text as .txt. Use when a PDF is a scan or photo with no selectable text, when the user wants to OCR a PDF, search or copy text from a scanned document, read the text of an image-only PDF, or fix an upside-down or sideways scan.
 ---
 
 # copyable-pdf
 
-`copyable-pdf` renders each page of a PDF, recognises its text locally, and
-writes a searchable PDF. It can also write the recognised text beside it. The
-default engine is PaddleOCR's PP-OCRv6 models run by RapidOCR; `--tesseract`
-uses Tesseract instead.
+`copyable-pdf` renders each page of a PDF, recognises its text locally with
+PaddleOCR's PP-OCRv6 models (run by RapidOCR), and writes a searchable PDF. It
+can also write the recognised text beside it.
 
 ## Before running
 
@@ -23,13 +22,10 @@ uses Tesseract instead.
    stops with exit 1 and names what is missing. Install it yourself, with the
    user's approval:
    - always: `poppler` and `uv` (`brew install poppler uv`);
-   - `--tesseract`: `tesseract`, plus `tesseract-lang` (or
-     `tesseract-ocr-<code>`) for languages other than English;
-   - `--preserve`: `qpdf`;
-   - `--clean`: `imagemagick`.
+   - `--preserve`: `qpdf`.
 4. Outside Homebrew, the first run installs the OCR engine (about 300 MB,
    under a minute) into `~/.cache/copyable-pdf/ocr-engine` and keeps it. Tell
-   the user before that first run. `--no-save` installs for one run only.
+   the user before that first run.
 
 ## Running
 
@@ -45,34 +41,26 @@ Pick the options from the document and the request:
 | Situation | Option |
 | :--- | :--- |
 | Not English (most important setting) | `-l fra`, `-l spa`, or mixed `-l fra+eng` |
-| Phone photos, or the original must stay untouched (archives, legal documents) | `-p` / `--preserve` (keeps the file small: no 300 DPI rebuild) |
-| Small print, footnotes, dense tables | `-d 400` |
-| Every character counts, time does not | `--model medium` |
-| Speed matters more than accuracy | `--model tiny` |
-| The user wants the text itself | `-t` (plain text), `-m` (layout kept, written as `.md`) |
+| The original must stay untouched (archives, legal documents, anything kept) | `-p` / `--preserve` |
+| Print smaller than 5-6 pt | `-d 400` |
+| The user wants the text itself | `-t` (writes a `.txt` beside the PDF) |
 | Custom output path | `-o path/out.pdf` (the directory must exist) |
-| The user asks for Tesseract, or Python cannot be installed | `--tesseract` (much weaker on photos) |
 
 - Pages are turned upright automatically, upside down or sideways.
-- Without `--preserve` the PDF is rebuilt from 300 DPI renderings: photos can
-  grow from a few MB to tens of MB, and vector content is rasterised.
-- `--clean` straightens pages and evens out lighting; it helps `--tesseract`
-  a lot and the default engine little. It changes how pages look and cannot
-  be combined with `--preserve`.
-- `--paddle`, `--save-paddle` and `--paddle-model` are 1.6 names, still
-  accepted; the default engine already does what they did.
+- Without `--preserve` the PDF is rebuilt from 300 DPI renderings: photos stay
+  JPEG and scans lossless, but vector content is rasterised.
 
 ## Results
 
 - Exit 0: the output is written. Check it with
   `pdftotext out.pdf - | head -40` and show the user a short sample.
 - Exit 2: bad options or input (missing file, not a PDF, output over the
-  input, `--clean` with `--preserve`, a language the engine lacks), caught
-  before any OCR. Nothing is written.
+  input, an unknown option, a language no model reads), caught before any OCR.
+  Nothing is written.
 - Exit 1: a missing dependency, or a page failed OCR. The error names the page.
   Nothing is written: the tool never returns a PDF with pages missing.
 - A warning about an existing text layer means the input was already
   searchable; see step 2 above.
 
-The default engine takes about a second a page; run long documents in the
-background and report when they finish.
+OCR takes about a second a page; run long documents in the background and
+report when they finish.

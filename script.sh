@@ -15,23 +15,15 @@ KEEP_TEMP=false
 VERBOSE=false
 COLOR_SUPPORT=true
 GEN_TEXT=false
-GEN_MD=false
 PRESERVE=false
-CLEAN=false
-PLAIN=false
-TESSDATA_DIR=""
-# The default engine: PaddleOCR's PP-OCRv6 models, run by RapidOCR on ONNX
-# Runtime. --tesseract switches to Tesseract.
-PADDLE=true
-PADDLE_MODEL="small"
-NO_SAVE=false
+# The OCR engine: PaddleOCR's PP-OCRv6 models, run by RapidOCR on ONNX Runtime.
 INSTALL_ONLY=false
 # Pinned: the helper below relies on this RapidOCR's results and model names,
 # and a pin change is what makes an installed engine get rebuilt.
-PADDLE_PACKAGES=(rapidocr==3.10.0 onnxruntime==1.31.0)
+ENGINE_PACKAGES=(rapidocr==3.10.0 onnxruntime==1.31.0)
 # Where the engine lives between runs. The Homebrew formula points this inside
 # its own prefix (COPYABLE_PDF_HOME), where `brew install` has already put it.
-PADDLE_SAVED_HOME="${COPYABLE_PDF_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/copyable-pdf}/ocr-engine"
+ENGINE_HOME="${COPYABLE_PDF_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/copyable-pdf}/ocr-engine"
 
 # --- Colors ---
 if [ -t 1 ] && [ "$COLOR_SUPPORT" = true ]; then
@@ -84,7 +76,7 @@ draw_progress_bar() {
 }
 
 # A spinner for the steps that give no progress of their own: installing
-# PaddleOCR, loading its models, cleaning pages. Off a terminal, one log line.
+# the OCR engine, loading its models. Off a terminal, one log line.
 #
 # It is never killed. It used to be, and the first progress line stops it from
 # inside the pipeline's subshell, which is not its parent: bash then reaped a
@@ -170,32 +162,16 @@ print_usage() {
     echo "  input_file           Path to the input PDF file"
     echo ""
     echo "Options:"
-    echo "  -l, --lang <code>    Language code(s) (e.g., 'eng', 'fra', 'eng+fra') (default: eng)"
+    echo "  -l, --lang <code>    Language code(s) (e.g., 'eng', 'fra', 'eng+fra', or 'en') (default: eng)"
     echo "  -o, --output <path>  Custom output file path"
     echo "  -d, --dpi <num>      DPI resolution for OCR (default: 300)"
-    echo "  -j, --jobs <num>     Number of parallel jobs (default: auto)"
+    echo "  -j, --jobs <num>     OCR processes working on pages at once (default: a third of the cores, up to 4)"
     echo "  -t, --text           Generate an additional .txt file"
-    echo "  -m, --markdown       Generate an additional .md file (layout-preserved plain text)"
     echo "  -p, --preserve       Keep the original pages and add an invisible text"
     echo "                       layer on top (needs qpdf) instead of rebuilding"
     echo "                       the PDF from rasterised images"
-    echo "  -c, --clean          Straighten pages and flatten shadows before OCR"
-    echo "                       (needs ImageMagick). The output shows the"
-    echo "                       cleaned pages. Not with --preserve"
-    echo "      --model <tiny|small|medium>"
-    echo "                       OCR model size: faster or more accurate (default: small)"
-    echo "      --no-save        Install the OCR engine for this run only, in the"
-    echo "                       temp dir, and delete it afterwards"
     echo "      --install-engine Install the OCR engine and its models, then exit"
     echo "                       (Homebrew does this at install time)"
-    echo "      --tesseract      Recognise with Tesseract instead of the default"
-    echo "                       engine (PaddleOCR's models): lighter, much weaker"
-    echo "                       on photos and poor scans"
-    echo "      --plain          With --tesseract: skip automatic rotation and"
-    echo "                       adaptive thresholding (the pre-1.4 behaviour)"
-    echo "      --tessdata-dir <path>"
-    echo "                       With --tesseract: read language models from this"
-    echo "                       directory (e.g. a tessdata_best checkout)"
     echo "  -k, --keep           Keep temporary files (debug mode)"
     echo "  -v, --verbose        Verbose output"
     echo "  -h, --help           Show this help message"
@@ -204,10 +180,9 @@ print_usage() {
     echo "Examples:"
     echo "  copyable-pdf document.pdf"
     echo "  copyable-pdf -l fra+eng -t document.pdf"
-    echo "  copyable-pdf --jobs 8 -k document.pdf"
+    echo "  copyable-pdf --jobs 2 -k document.pdf"
     echo "  copyable-pdf --preserve scan.pdf"
     echo "  copyable-pdf -l spa -p -t photo-of-a-form.pdf"
-    echo "  copyable-pdf --tesseract --clean -l fra scan.pdf"
 }
 
 ask_yes_no() {
@@ -282,55 +257,12 @@ require_command() {
     fi
 }
 
-# Is this traineddata available to tesseract? Honours --tessdata-dir, so the
-# check looks where the OCR will actually look.
-has_tess_lang() {
-    local dir_opts=()
-    if [ -n "$TESSDATA_DIR" ]; then
-        dir_opts=(--tessdata-dir "$TESSDATA_DIR")
-    fi
-    tesseract "${dir_opts[@]}" --list-langs 2>/dev/null | grep -qx "$1"
-}
-
-require_language() {
-    local langs_arg="$1"
-    # Split by '+'
-    local IFS='+'
-    read -ra LANGS <<< "$langs_arg"
-
-    for lang in "${LANGS[@]}"; do
-        if ! has_tess_lang "$lang"; then
-            # A package manager installs into the system tessdata, never into a
-            # directory the user picked, so offering it there would install
-            # something the run still cannot see.
-            if [ -n "$TESSDATA_DIR" ]; then
-                log_error "No '$lang.traineddata' in $TESSDATA_DIR."
-                exit 1
-            fi
-            log_warn "Missing Tesseract language data for: $lang"
-            local manager
-            manager=$(detect_pkg_manager)
-            if [ -n "$manager" ]; then
-                 if ask_yes_no "Install language pack for '$lang'?"; then
-                    case "$manager" in
-                        brew) install_package "$manager" "tesseract-lang" || true ;;
-                        apt) install_package "$manager" "tesseract-ocr-${lang}" || true ;;
-                        dnf|yum) install_package "$manager" "tesseract-langpack-${lang}" || true ;;
-                    esac
-                 fi
-            fi
-            
-            if ! has_tess_lang "$lang"; then
-                log_error "Language '$lang' still not installed. Exiting."
-                exit 1
-            fi
-        fi
-    done
-}
-
-# Tesseract language code -> PaddleOCR's, or nothing when Paddle has no model.
-paddle_lang_code() {
+# Language code (three letters, ISO 639-2, as copyable-pdf always took, or
+# PaddleOCR's own) -> PaddleOCR's, or nothing when no model reads it.
+engine_lang_code() {
     case "$1" in
+        en|fr|es|de|it|pt|nl|pl|cs|da|sv|no|fi|ro|hu|tr|ca|hr|sk|sl|lt|lv|et|id|ms|vi|la|ga|cy|af|is|sq|eu|gl|mt|bs|az|uz|sw|tl|oc|lb) echo "$1" ;;
+        ch|chinese_cht|japan|korean|ru|uk|be|bg|mk|rs_cyrillic|rs_latin|kk|mn|ar|fa|ur|hi|mr|ne|th|el|ta|te) echo "$1" ;;
         eng) echo en ;;        fra) echo fr ;;        spa) echo es ;;
         deu) echo de ;;        ita) echo it ;;        por) echo pt ;;
         nld) echo nl ;;        pol) echo pl ;;        ces) echo cs ;;
@@ -357,26 +289,19 @@ paddle_lang_code() {
     esac
 }
 
-# Install the OCR engine (or find it installed) and set PADDLE_PY and
-# PADDLE_MODELS_DIR. Everything lives under one directory — the interpreter uv
-# fetches, the packages, the models — so deleting it removes every trace. It is
-# kept between runs; --no-save puts it in the run's temp dir instead.
-setup_paddle() {
-    local home where
-    if [ "$NO_SAVE" = true ]; then
-        home="$TEMP_DIR/ocr-engine"
-        where="a temporary folder, deleted after the run"
-    else
-        home="$PADDLE_SAVED_HOME"
-        where="$home"
-    fi
+# Install the OCR engine (or find it installed) and set ENGINE_PY and
+# ENGINE_MODELS_DIR. Everything lives under one directory, kept between runs —
+# the interpreter uv fetches, the packages, the models — so deleting it removes
+# every trace.
+setup_engine() {
+    local home="$ENGINE_HOME"
     export UV_PYTHON_INSTALL_DIR="$home/python" UV_NO_CACHE=1 UV_NO_PROGRESS=1
-    PADDLE_PY="$home/venv/bin/python"
-    PADDLE_MODELS_DIR="$home/models"
+    ENGINE_PY="$home/venv/bin/python"
+    ENGINE_MODELS_DIR="$home/models"
 
     local marker
-    marker="$home/venv/.copyable-pdf-$(echo "${PADDLE_PACKAGES[*]}" | tr ' =' '_-')"
-    if [ -x "$PADDLE_PY" ] && [ -f "$marker" ]; then
+    marker="$home/venv/.copyable-pdf-$(echo "${ENGINE_PACKAGES[*]}" | tr ' =' '_-')"
+    if [ -x "$ENGINE_PY" ] && [ -f "$marker" ]; then
         if [ "$VERBOSE" = true ]; then
             log_info "Using the OCR engine in $home"
         fi
@@ -387,9 +312,9 @@ setup_paddle() {
     mkdir -p "$home"
     # onnxruntime ships wheels for a handful of Python versions only, so ask uv
     # for 3.12 whatever the system Python is; uv downloads one if it has to.
-    spinner_start "Installing the OCR engine into $where (~300 MB, one-off)"
+    spinner_start "Installing the OCR engine into $home (~300 MB, one-off)"
     if ! { uv venv -q --python 3.12 "$home/venv" &&
-           uv pip install -q --python "$PADDLE_PY" "${PADDLE_PACKAGES[@]}"; } \
+           uv pip install -q --python "$ENGINE_PY" "${ENGINE_PACKAGES[@]}"; } \
             >"$TEMP_DIR/engine-install.log" 2>&1; then
         spinner_stop
         log_error "Could not install the OCR engine:"
@@ -399,27 +324,27 @@ setup_paddle() {
     fi
     touch "$marker"
     spinner_stop
-    log_success "OCR engine installed in $where."
+    log_success "OCR engine installed in $home."
 }
 
 # The OCR side, written out at run time: copyable-pdf installs as a single
 # file, so the helper travels inside it.
-write_paddle_helper() {
-    cat > "$1" <<'PADDLE_HELPER_EOF'
+write_engine_helper() {
+    cat > "$1" <<'ENGINE_HELPER_EOF'
 """Recognise page images with PaddleOCR's models and write one PDF per page.
 
 The models (PP-OCRv6, or PP-OCRv5 for scripts v6 does not read) run through
 RapidOCR on ONNX Runtime: the same recognition as the PaddleOCR package, at a
 fraction of its size and several times its speed on a CPU.
 
-Each page-N.png becomes page-N.pdf, built the way tesseract builds its own:
-the page image (unless --textonly) under an invisible text layer in a
-glyphless CID font, so the rest of copyable-pdf merges and stamps the result
-exactly as it does tesseract's. On stdout, one line per page: DONE, or
+Each page-N.png becomes page-N.pdf: the page image (unless --textonly) under
+an invisible text layer in a glyphless CID font, which the rest of
+copyable-pdf merges, or stamps onto the original under --preserve. On stdout, one line per page: DONE, or
 FAIL <name> with the reason in page-N.err. READY once the models are loaded.
 Everything else goes to stderr, so stdout carries only that.
 """
 import argparse
+import base64
 import contextlib
 import math
 import os
@@ -445,19 +370,26 @@ V5_SCRIPT = {
 }
 
 
-def load_ocr(langs, model, models_dir):
+def load_ocr(langs, models_dir, threads=0):
     from rapidocr import LangRec, ModelType, OCRVersion, RapidOCR
 
-    params = {"Global.log_level": "error"}
+    # Pages are shrunk to 2500 px on their long side before detection; at
+    # RapidOCR's default 2000, 5-6 pt print at 300 DPI lost whole lines, and at
+    # full size noisy low-resolution scans read worse.
+    # Word boxes: each word goes into the text layer where it sits on the page.
+    params = {"Global.log_level": "error", "Global.max_side_len": 2500,
+              "Global.return_word_box": True}
     if models_dir:
         os.makedirs(models_dir, exist_ok=True)
         params["Global.model_root_dir"] = models_dir
+    if threads > 0:
+        params["EngineConfig.onnxruntime.intra_op_num_threads"] = threads
     if all(lang in V6_LANGS for lang in langs):
-        # The tiny v6 model has no Japanese.
-        size = ModelType.SMALL if model == "tiny" and "japan" in langs else ModelType(model)
+        # small: medium read no better on any test page, at three times the
+        # time; tiny made mistakes.
         for part in ("Det", "Rec"):
             params[f"{part}.ocr_version"] = OCRVersion.PPOCRV6
-            params[f"{part}.model_type"] = size
+            params[f"{part}.model_type"] = ModelType.SMALL
     else:
         script = next(V5_SCRIPT[lang] for lang in langs if lang in V5_SCRIPT)
         if len({V5_SCRIPT.get(lang, "v6") for lang in langs}) > 1:
@@ -467,7 +399,36 @@ def load_ocr(langs, model, models_dir):
             params[f"{part}.ocr_version"] = OCRVersion.PPOCRV5
             params[f"{part}.model_type"] = ModelType.MOBILE
         params["Rec.lang_type"] = LangRec(script)
-    return RapidOCR(params=params)
+    # The line orientation classifier RapidOCR picks by default (PP-OCRv4)
+    # turns about one upright line in ten upside down, which then reads as
+    # junk ("ohs s fo d p s"). PP-OCRv5's server classifier, the one the
+    # paddleocr package uses, made no such mistake on any test page.
+    params["Cls.ocr_version"] = OCRVersion.PPOCRV5
+    params["Cls.model_type"] = ModelType.SERVER
+    ocr = RapidOCR(params=params)
+    spy_on_line_flips(ocr)
+    return ocr
+
+
+def spy_on_line_flips(ocr):
+    """Record, per call, the share of lines the classifier found upside down.
+
+    RapidOCR turns those lines round before reading them but does not report
+    it. recognise() needs it: on an upside-down page every line reads fine,
+    yet in reverse order, and only this share tells such a page apart.
+    """
+    ocr.flipped_share = 0.0
+    run = getattr(ocr, "cls_and_rotate", None)
+    if run is None:
+        return
+
+    def spied(imgs):
+        out = run(imgs)
+        labels = [label for label, _ in (out[1].cls_res or [])]
+        ocr.flipped_share = labels.count("180") / len(labels) if labels else 0.0
+        return out
+
+    ocr.cls_and_rotate = spied
 
 
 # Each rotation to try, and how a point (u, v) in the rotated image maps back
@@ -495,6 +456,10 @@ def recognise(ocr, img_path):
     line stood upright, but with every box standing on end its text layer
     comes out as words run together. Turned a quarter, the same lines lie
     flat and win.
+
+    Nor does a page whose lines mostly had to be turned round: it reads well,
+    but its lines come out in reverse order. Turned round, it reads as well,
+    in order.
     """
     import cv2
 
@@ -506,16 +471,42 @@ def recognise(ocr, img_path):
         txts = [str(t) for t in (out.txts or ())]
         scores = [float(s) for s in (out.scores or ())]
         boxes = [] if out.boxes is None else out.boxes.tolist()
-        flat = [math.dist(b[0], b[1]) >= math.dist(b[0], b[3]) for b in boxes]
+        upside_down = ocr.flipped_share > 0.5
+        flat = [not upside_down and math.dist(b[0], b[1]) >= math.dist(b[0], b[3])
+                for b in boxes]
         weight = sum(s * len(t) for t, s, f in zip(txts, scores, flat) if f)
         if best is None or weight > best[0]:
-            best = (weight, txts, boxes, back)
+            words = list(out.word_results or ())
+            best = (weight, txts, boxes, words if len(words) == len(txts) else [], back)
         confident = [s for s, f in zip(scores, flat) if f]
         if best[0] == weight and confident and len(confident) * 2 > len(boxes) \
                 and sum(confident) / len(confident) >= 0.9:
             break
-    _, txts, boxes, back = best
-    return [(t, [back(x, y, w, h) for x, y in box]) for t, box in zip(txts, boxes)]
+    _, txts, boxes, words, back = best
+    lines = []
+    for i, (t, box) in enumerate(zip(txts, boxes)):
+        line_words = [(str(wt), [back(x, y, w, h) for x, y in wb])
+                      for wt, _, wb in (words[i] if words else ())]
+        lines.append((t, [back(x, y, w, h) for x, y in box], line_words))
+    return lines
+
+
+# Tesseract's GlyphLessFont (Apache-2.0, from tesseract-ocr/tesseract):
+# 572 bytes, one empty glyph that every character maps to. Embedded so
+# the invisible text needs no font file on the machine.
+GLYPHLESS_FONT = base64.b64decode(
+    "AAEAAAAKAIAAAwAgT1MvMlbeyJQAAAEoAAAAYGNtYXAACgA0AAABkAAAAB5nbHlmFSJBJAAAAbgA"
+    "AAAYaGVhZAt48WUAAACsAAAANmhoZWEMAgQCAAAA5AAAACRobXR4BAAAAAAAAYgAAAAIbG9jYQAM"
+    "AAAAAAGwAAAABm1heHAABAAFAAABCAAAACBuYW1l8usW2gAAAdAAAABLcG9zdAABAAEAAAIcAAAA"
+    "IAABAAAAAQAAsJRxEF8PPPUEBwgAAAAAAM+a/G4AAAAA1MOn8gAAAAAEAAgAAAAAEAACAAAAAAAA"
+    "AAEAAAgA//8AAAQAAAAAAAQAAAEAAAAAAAAAAAAAAAAAAAACAAEAAAACAAQAAQAAAAAAAQAAAAAA"
+    "AAAAAAAAAAAAAAAAAwAAAZAABQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUAAQABAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAR09PRwBAAAAAAAAB//8AAAABAAGAAAAAAAAAAAAAAAAAAAABAAAAAAAABAAA"
+    "AAAAAAIAAQAAAAAAFAADAAAAAAAUAAYACgAAAAAAAAAAAAAAAAAMAAAAAQAAAAAEAAgAAAMAADEh"
+    "ESEEAPwACAAAAAADACoAAAADAAAABQAWAAAAAQAAAAAABQALABYAAwABBAkABQAWAAAAVgBlAHIA"
+    "cwBpAG8AbgAgADEALgAwVmVyc2lvbiAxLjAAAAEAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAA"
+    "AAA="
+)
 
 
 def tounicode_cmap():
@@ -543,7 +534,76 @@ def stream(entries, data, compress=True):
     return b"<< %s /Length %d >>\nstream\n%s\nendstream" % (entries, len(data), data)
 
 
-def write_page(img_path, out_path, lines, dpi, textonly, font):
+def image_xobject(im, jpeg):
+    """The page image as a PDF image object, as small as it can honestly be.
+
+    pdftoppm renders every page in RGB, so a page with no colour in it is
+    stored as grey: a third of the size. Photos (the source PDF held JPEGs)
+    go back in as JPEG, which they already were; stored losslessly instead, a
+    3 MB PDF of phone photos came out at 90 MB. Everything else is kept
+    lossless, with PNG's Up filter ahead of Flate, which roughly halves scans.
+    """
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    if im.mode not in ("L", "RGB"):
+        im = im.convert("L" if im.mode in ("1", "LA", "I;16") else "RGB")
+    if im.mode == "RGB":
+        a = np.asarray(im)
+        if (a[..., 0] == a[..., 1]).all() and (a[..., 1] == a[..., 2]).all():
+            im = Image.fromarray(a[..., 0])
+    gray = im.mode == "L"
+    head = (b"/Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace %s"
+            b" /BitsPerComponent 8" % (im.width, im.height,
+                                       b"/DeviceGray" if gray else b"/DeviceRGB"))
+    if jpeg:
+        buf = io.BytesIO()
+        im.save(buf, "JPEG", quality=80, optimize=True)
+        return stream(head + b" /Filter /DCTDecode", buf.getvalue(), compress=False)
+    a = np.asarray(im)
+    rows = a.reshape(im.height, -1)
+    up = np.empty((im.height, rows.shape[1] + 1), np.uint8)
+    up[:, 0] = 2  # PNG filter type 2: each byte minus the byte above it
+    up[0, 1:] = rows[0]
+    up[1:, 1:] = rows[1:] - rows[:-1]
+    colors = 1 if gray else 3
+    return stream(head + b" /DecodeParms << /Predictor 12 /Colors %d /BitsPerComponent 8"
+                  b" /Columns %d >>" % (colors, im.width), up.tobytes())
+
+
+def line_pieces(text, words, origin, direction, length, scale, ph):
+    """(text, start, width) runs to lay along a line, in PDF points.
+
+    Word by word where the recogniser located the words, so selecting or
+    finding a word highlights that word rather than a stretch of the line.
+    Each word but the last carries its trailing space and runs up to the next
+    word: the gap between two words can be a single pixel, and a viewer only
+    sees a space where there is a space character. Otherwise, the whole line.
+    """
+    joined = " ".join(word for word, _ in words)
+    if not words or joined.replace(" ", "") != text.replace(" ", ""):
+        return [(text, 0.0, length)]
+
+    def along(pt):
+        x, y = pt[0] * scale, ph - pt[1] * scale
+        return (x - origin[0]) * direction[0] + (y - origin[1]) * direction[1]
+
+    # Corners in reading order: a word starts at its bottom-left, ends at its
+    # bottom-right.
+    spans = sorted((min(max(along(box[3]), 0.0), length),
+                    min(max(along(box[2]), 0.0), length), word) for word, box in words)
+    pieces = []
+    for i, (start, end, word) in enumerate(spans):
+        if i + 1 < len(spans):
+            word, end = word + " ", spans[i + 1][0]
+        if end - start >= 0.5 and word.strip():
+            pieces.append((word, start, end - start))
+    return pieces or [(text, 0.0, length)]
+
+
+def write_page(img_path, out_path, lines, dpi, textonly, font, jpeg=False):
     from PIL import Image
 
     im = Image.open(img_path)
@@ -555,7 +615,7 @@ def write_page(img_path, out_path, lines, dpi, textonly, font):
     if not textonly:
         ops.append(b"q %.2f 0 0 %.2f 0 0 cm /Im0 Do Q" % (pw, ph))
     ops.append(b"BT 3 Tr")
-    for text, poly in lines:
+    for text, poly, words in lines:
         if not text:
             continue
         # The corners come in reading order: start and end of the top edge,
@@ -579,12 +639,15 @@ def write_page(img_path, out_path, lines, dpi, textonly, font):
             origin = (mid[0] - length / 2 * math.cos(theta),
                       mid[1] - length / 2 * math.sin(theta))
         cos, sin = math.cos(theta), math.sin(theta)
-        # The glyphless font is 500 units wide per character; stretch the line
-        # so it spans the box the text was found in.
-        tz = 100.0 * length / (len(text) * 0.5 * size)
-        hexed = text.encode("utf-16-be").hex().upper().encode()
-        ops.append(b"%.4f %.4f %.4f %.4f %.2f %.2f Tm /F0 %.2f Tf %.2f Tz <%s> Tj"
-                   % (cos, sin, -sin, cos, origin[0], origin[1], size, tz, hexed))
+        for piece, start, width in line_pieces(text, words, origin, (cos, sin), length,
+                                               scale, ph):
+            # The glyphless font is 500 units wide per character; stretch each
+            # piece so it spans the stretch of line it was read from.
+            tz = 100.0 * width / (len(piece) * 0.5 * size)
+            hexed = piece.encode("utf-16-be").hex().upper().encode()
+            x, y = origin[0] + start * cos, origin[1] + start * sin
+            ops.append(b"%.4f %.4f %.4f %.4f %.2f %.2f Tm /F0 %.2f Tf %.2f Tz <%s> Tj"
+                       % (cos, sin, -sin, cos, x, y, size, tz, hexed))
     ops.append(b"ET")
 
     objs = {}
@@ -611,14 +674,7 @@ def write_page(img_path, out_path, lines, dpi, textonly, font):
         objs[9] = stream(b"", b"\x00\x01" * 65536)
         objs[10] = stream(b"/Length1 %d" % len(font), font)
     if not textonly:
-        if im.mode not in ("L", "RGB"):
-            im = im.convert("L" if im.mode in ("1", "LA", "I;16") else "RGB")
-        space = b"/DeviceGray" if im.mode == "L" else b"/DeviceRGB"
-        objs[11] = stream(
-            b"/Type /XObject /Subtype /Image /Width %d /Height %d"
-            b" /ColorSpace %s /BitsPerComponent 8" % (w_px, h_px, space),
-            im.tobytes(),
-        )
+        objs[11] = image_xobject(im, jpeg)
 
     out = bytearray(b"%PDF-1.5\n%\xe2\xe3\xcf\xd3\n")
     size = max(objs) + 1
@@ -642,21 +698,20 @@ def write_page(img_path, out_path, lines, dpi, textonly, font):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--lang", required=True, help="PaddleOCR codes, comma separated")
-    ap.add_argument("--model", default="small")
     ap.add_argument("--models-dir", default="")
+    ap.add_argument("--threads", type=int, default=0,
+                    help="CPU threads for ONNX Runtime (0: all of them)")
     ap.add_argument("--warmup", action="store_true",
                     help="load (downloading if needed) the models, then exit")
     ap.add_argument("--dpi", type=float, default=300)
     ap.add_argument("--textonly", action="store_true")
-    ap.add_argument("--font", default="")
+    ap.add_argument("--jpeg", action="store_true",
+                    help="store page images as JPEG (the source pages were)")
     ap.add_argument("images", nargs="*")
     args = ap.parse_args()
 
     out = sys.stdout
-    font = b""
-    if args.font and os.path.isfile(args.font):
-        with open(args.font, "rb") as f:
-            font = f.read()
+    font = GLYPHLESS_FONT
 
     def report(line):
         print(line, file=out, flush=True)
@@ -671,7 +726,7 @@ def main():
 
     try:
         with contextlib.redirect_stdout(sys.stderr):
-            ocr = load_ocr(args.lang.split(","), args.model, args.models_dir)
+            ocr = load_ocr(args.lang.split(","), args.models_dir, args.threads)
     except Exception as exc:  # no network, bad model name, broken install...
         for img in args.images:
             fail(img, f"The OCR models could not load: {type(exc).__name__}: {exc}")
@@ -680,6 +735,15 @@ def main():
         return 1
     report("READY")
     if args.warmup:
+        # RapidOCR fetches the classifier and recogniser only when a first
+        # line needs them, so read one, or the first real run downloads them.
+        import cv2
+        import numpy as np
+
+        sample = np.full((96, 480, 3), 255, np.uint8)
+        cv2.putText(sample, "warm up 123", (12, 64), cv2.FONT_HERSHEY_SIMPLEX, 1.6, (0, 0, 0), 3)
+        with contextlib.redirect_stdout(sys.stderr):
+            ocr(sample)
         return 0
 
     status = 0
@@ -688,7 +752,7 @@ def main():
             with contextlib.redirect_stdout(sys.stderr):
                 lines = recognise(ocr, img)
             write_page(img, os.path.splitext(img)[0] + ".pdf", lines,
-                       args.dpi, args.textonly, font)
+                       args.dpi, args.textonly, font, args.jpeg)
             report("DONE")
         except Exception as exc:
             fail(img, f"{type(exc).__name__}: {exc}")
@@ -698,7 +762,7 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-PADDLE_HELPER_EOF
+ENGINE_HELPER_EOF
 }
 
 # --- Main Logic ---
@@ -724,8 +788,8 @@ INPUT_FILE=""
 OUTPUT_FILE=""
 DPI="$DEFAULT_DPI"
 # NOT `LANG`: that is the POSIX locale variable, and it is already exported in
-# almost every shell, so assigning a tesseract code to it ships an invalid locale
-# ("fra+eng") to every child process — pdftoppm, pdftotext, sort, tesseract
+# almost every shell, so assigning a language code to it ships an invalid locale
+# ("fra+eng") to every child process — pdftoppm, pdftotext, sort, the engine
 # itself. Keep the OCR language in a name of our own.
 OCR_LANG="$DEFAULT_LANG"
 JOBS=""
@@ -757,44 +821,8 @@ while [[ $# -gt 0 ]]; do
             GEN_TEXT=true
             shift
             ;;
-        -m|--markdown)
-            GEN_MD=true
-            shift
-            ;;
         -p|--preserve)
             PRESERVE=true
-            shift
-            ;;
-        -c|--clean)
-            CLEAN=true
-            shift
-            ;;
-        --plain)
-            PLAIN=true
-            shift
-            ;;
-        --tessdata-dir)
-            require_value "$key" "$#"
-            TESSDATA_DIR="$2"
-            shift; shift
-            ;;
-        --tesseract)
-            PADDLE=false
-            shift
-            ;;
-        # --paddle and --save-paddle are what 1.6 needed for what is now the
-        # default; still accepted, so existing commands keep working.
-        --paddle|--save-paddle)
-            PADDLE=true
-            shift
-            ;;
-        --model|--paddle-model)
-            require_value "$key" "$#"
-            PADDLE_MODEL="$2"
-            shift; shift
-            ;;
-        --no-save)
-            NO_SAVE=true
             shift
             ;;
         --install-engine)
@@ -818,6 +846,13 @@ while [[ $# -gt 0 ]]; do
             echo "copyable-pdf $VERSION"
             exit 0
             ;;
+        # An unknown option is an error, not an input file name: taken as the
+        # input, `--foo doc.pdf` failed later on as "Unknown argument: doc.pdf".
+        -?*)
+            log_error "Unknown option: $key"
+            print_usage
+            exit 2
+            ;;
         *)
             if [ -z "$INPUT_FILE" ]; then
                 INPUT_FILE="$1"
@@ -831,23 +866,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-case "$PADDLE_MODEL" in
-    tiny|small|medium) ;;
-    *) log_error "--model must be tiny, small or medium (got '$PADDLE_MODEL')."; exit 2 ;;
-esac
-
 # Install the engine and fetch its models now, so the first real run starts
 # straight away. The Homebrew formula calls this from post_install.
 if [ "$INSTALL_ONLY" = true ]; then
     require_command uv uv
     TEMP_DIR=$(mktemp -d)
     trap 'spinner_stop; rm -rf "$TEMP_DIR"' EXIT
-    NO_SAVE=false
-    setup_paddle
-    write_paddle_helper "$TEMP_DIR/ocr.py"
-    spinner_start "Downloading the OCR models ($PADDLE_MODEL)"
-    if ! "$PADDLE_PY" -W ignore "$TEMP_DIR/ocr.py" --warmup --lang en \
-            --model "$PADDLE_MODEL" --models-dir "$PADDLE_MODELS_DIR" \
+    setup_engine
+    write_engine_helper "$TEMP_DIR/ocr.py"
+    spinner_start "Downloading the OCR models"
+    if ! "$ENGINE_PY" -W ignore "$TEMP_DIR/ocr.py" --warmup --lang en \
+            --models-dir "$ENGINE_MODELS_DIR" \
             >/dev/null 2>"$TEMP_DIR/warmup.log"; then
         spinner_stop
         log_error "Could not download the OCR models:"
@@ -855,7 +884,7 @@ if [ "$INSTALL_ONLY" = true ]; then
         exit 1
     fi
     spinner_stop
-    log_success "OCR engine ready in $PADDLE_SAVED_HOME."
+    log_success "OCR engine ready in $ENGINE_HOME."
     exit 0
 fi
 
@@ -876,7 +905,6 @@ if [ -z "$INPUT_FILE" ]; then
     DPI=$(prompt_input "DPI Resolution" "$DEFAULT_DPI")
 
     if ask_yes_no "Generate text file (.txt)?"; then GEN_TEXT=true; fi
-    if ask_yes_no "Generate .md file (layout-preserved plain text)?"; then GEN_MD=true; fi
 
     # Optional Output. NOT `local` — this block runs at script scope, not inside
     # a function, where bash rejects `local` outright ("can only be used in a
@@ -933,36 +961,18 @@ case "$DPI" in
     0) log_error "DPI must be greater than 0."; exit 2 ;;
 esac
 
-# Cleaning deskews the page, so its text no longer sits where it does on the
-# original — and --preserve stamps the text onto the original. The two would
-# produce a text layer shifted off every line, so refuse rather than ship that.
-if [ "$CLEAN" = true ] && [ "$PRESERVE" = true ]; then
-    log_error "--clean straightens the page, so its text cannot line up with the untouched original that --preserve keeps. Use one or the other."
-    exit 2
-fi
-
-if [ -n "$TESSDATA_DIR" ] && [ ! -d "$TESSDATA_DIR" ]; then
-    log_error "Tessdata directory does not exist: $TESSDATA_DIR"
-    exit 2
-fi
-
 # PaddleOCR's models name languages their own way; translate now, so an
 # unsupported one fails here rather than after an install.
-PADDLE_LANGS=""
-if [ "$PADDLE" = true ]; then
-    IFS='+' read -ra TESS_LANGS <<< "$OCR_LANG"
-    for lang in "${TESS_LANGS[@]}"; do
-        code="$(paddle_lang_code "$lang")"
-        if [ -z "$code" ]; then
-            log_error "The default OCR engine has no model for language '$lang'. Add --tesseract to use Tesseract."
-            exit 2
-        fi
-        PADDLE_LANGS="${PADDLE_LANGS:+$PADDLE_LANGS,}$code"
-    done
-    if [ "$PLAIN" = true ] || [ -n "$TESSDATA_DIR" ]; then
-        log_warn "--plain and --tessdata-dir are Tesseract settings; add --tesseract to use them."
+ENGINE_LANGS=""
+IFS='+' read -ra REQ_LANGS <<< "$OCR_LANG"
+for lang in "${REQ_LANGS[@]}"; do
+    code="$(engine_lang_code "$lang")"
+    if [ -z "$code" ]; then
+        log_error "No OCR model reads language '$lang'."
+        exit 2
     fi
-fi
+    ENGINE_LANGS="${ENGINE_LANGS:+$ENGINE_LANGS,}$code"
+done
 
 if [ -n "$JOBS" ]; then
     case "$JOBS" in
@@ -971,15 +981,19 @@ if [ -n "$JOBS" ]; then
     esac
 fi
 
-# Auto-detect cores if not set
+if command -v nproc >/dev/null 2>&1; then
+    CORES=$(nproc)
+elif command -v sysctl >/dev/null 2>&1; then
+    CORES=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+else
+    CORES=4
+fi
+# Pages are shared between JOBS OCR processes, each loading its own models and
+# running its share of the cores.
 if [ -z "$JOBS" ]; then
-    if command -v nproc >/dev/null 2>&1; then
-        JOBS=$(nproc)
-    elif command -v sysctl >/dev/null 2>&1; then
-        JOBS=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
-    else
-        JOBS=4
-    fi
+    JOBS=$(( CORES / 3 ))
+    if [ "$JOBS" -lt 1 ]; then JOBS=1; fi
+    if [ "$JOBS" -gt 4 ]; then JOBS=4; fi
 fi
 
 if [ "$VERBOSE" = true ]; then
@@ -991,31 +1005,15 @@ if [ "$VERBOSE" = true ]; then
     echo "  DPI:       $DPI"
     echo "  Jobs:      $JOBS"
     echo "  Text:      $GEN_TEXT"
-    echo "  Markdown:  $GEN_MD"
     echo "  Preserve:  $PRESERVE"
-    echo "  Clean:     $CLEAN"
-    echo "  Plain:     $PLAIN"
-    if [ "$PADDLE" = true ]; then
-        echo "  Engine:    PaddleOCR models via RapidOCR ($PADDLE_MODEL, $PADDLE_LANGS)"
-    else
-        echo "  Engine:    Tesseract"
-    fi
-    if [ -n "$TESSDATA_DIR" ]; then
-        echo "  Tessdata:  $TESSDATA_DIR"
-    fi
+    echo "  Engine:    PaddleOCR models via RapidOCR ($ENGINE_LANGS)"
     echo ""
 fi
 
 # 4. Dependency Checks
 log_info "Checking dependencies..."
-# The default engine needs no tesseract at all: only uv, to build its
-# environment. Tesseract, when installed, still lends its glyphless font.
-if [ "$PADDLE" = true ]; then
-    require_command uv uv
-else
-    require_command tesseract tesseract
-    require_language "$OCR_LANG"
-fi
+# uv builds the OCR engine's environment.
+require_command uv uv
 require_command pdftoppm poppler
 require_command pdftotext poppler
 
@@ -1026,45 +1024,9 @@ if ! command -v pdfunite >/dev/null 2>&1; then
 fi
 require_command pdfinfo poppler
 # Only --preserve needs qpdf, so the default path keeps its dependency list to
-# tesseract and poppler.
+# uv and poppler.
 if [ "$PRESERVE" = true ]; then
     require_command qpdf qpdf
-fi
-
-# ImageMagick 7 ships `magick`; 6 only has `convert`. Only --clean needs either.
-IM=""
-if [ "$CLEAN" = true ]; then
-    if command -v magick >/dev/null 2>&1; then
-        IM="magick"
-    elif command -v convert >/dev/null 2>&1; then
-        IM="convert"
-    else
-        require_command magick imagemagick
-        IM="magick"
-    fi
-fi
-
-# PSM 1 is PSM 3 (fully automatic layout) plus orientation detection. Without
-# it an upside-down page comes back as reversed gibberish, not as an error. The
-# text keeps the coordinates of the image as given, so --preserve stays aligned.
-# It needs osd.traineddata, which every packaged tesseract ships, but a bare
-# --tessdata-dir may not have it.
-PSM=3
-THRESHOLD_METHOD=""
-if [ "$PLAIN" = false ] && [ "$PADDLE" = false ]; then
-    if has_tess_lang osd; then
-        PSM=1
-    else
-        log_warn "No 'osd' language data, so pages will not be auto-rotated."
-    fi
-    # Sauvola thresholds each region against its own neighbourhood, so a shadow
-    # or a yellowed corner no longer swallows the text in it the way a single
-    # page-wide Otsu threshold does. The option only exists from tesseract 5.
-    TESS_MAJOR="$(tesseract --version 2>&1 | awk 'NR==1{split($2, v, "."); print v[1]}')"
-    case "$TESS_MAJOR" in
-        ''|*[!0-9]*) ;;
-        *) if [ "$TESS_MAJOR" -ge 5 ]; then THRESHOLD_METHOD=2; fi ;;
-    esac
 fi
 
 # Only now can the input be checked: pdfinfo ships with poppler, so this has to
@@ -1115,9 +1077,7 @@ if [ "$KEEP_TEMP" = true ]; then
     log_info "Temporary files will be kept at: $TEMP_DIR"
 fi
 
-if [ "$PADDLE" = true ]; then
-    setup_paddle
-fi
+setup_engine
 
 log_info "Step 1/3: Converting PDF to images ($DPI DPI)..."
 pdftoppm "$INPUT_FILE" "$TEMP_DIR/page" -png -r "$DPI"
@@ -1135,107 +1095,7 @@ if [ -n "$PDF_PAGES" ] && [ "$PAGE_COUNT" -ne "$PDF_PAGES" ]; then
 fi
 log_success "Generated $PAGE_COUNT pages."
 
-if [ "$PADDLE" = true ]; then
-    log_info "Step 2/3: OCR Processing ($OCR_LANG) with PaddleOCR models ($PADDLE_MODEL)..."
-else
-    log_info "Step 2/3: OCR Processing ($OCR_LANG) with $JOBS jobs..."
-fi
-
-# Export vars for xargs
-export LANG_CODE="$OCR_LANG"
-export VERBOSE
-export PRESERVE
-export CLEAN IM PSM THRESHOLD_METHOD TESSDATA_DIR
-
-# The pages already run in parallel, one process each. Left alone, tesseract
-# (OpenMP) and ImageMagick each also spread over every core, so N jobs ran N×N
-# threads that mostly waited on each other.
-if [ "$JOBS" -gt 1 ]; then
-    export OMP_THREAD_LIMIT=1 MAGICK_THREAD_LIMIT=1
-fi
-
-# Straighten the page, then divide out uneven lighting: the page over a
-# heavily blurred copy of itself is 1 (white) wherever there is only
-# background, shadow or not, while text stays dark. No -normalize after it:
-# stretching the contrast turns scanner noise in the margins into specks
-# that the OCR reads as junk lines. Done in place: the cleaned image is
-# both what gets recognised and what the output page shows.
-# The blur runs on a 1/10 thumbnail scaled back to the page's exact size: the
-# same lighting map, but in 2 s a page instead of 12. Two passes, because the
-# deskew decides that size and ImageMagick 6 cannot feed it back into -resize
-# within one command (no %[...] escapes in its geometry arguments).
-clean_page() {
-    local img="$1"
-    local base="${img%.*}"
-    local size
-    if ! size="$("$IM" "$img" -background white -deskew 40% +repage \
-                    -write "$img" -format '%wx%h' info: 2>"$base.err")" ||
-       ! "$IM" "$img" \( +clone -scale 10% -blur 0x2.5 -resize "${size}!" \) \
-            -compose Divide_Src -composite "$img" 2>>"$base.err"; then
-        echo "FAIL $(basename "$img")"
-        return 1
-    fi
-    rm -f "$base.err"
-}
-export -f clean_page
-
-process_page_worker() {
-    local img="$1"
-    local base="${img%.*}" # remove extension
-    local name
-    name="$(basename "$img")"
-
-    if [ "$VERBOSE" = true ]; then
-        echo "Processing $name..." >&2
-    fi
-
-    if [ "$CLEAN" = true ]; then
-        clean_page "$img" || return 1
-    fi
-
-    # tesseract input output -l lang pdf. Its exit status decides what we report:
-    # ignoring it (as this used to) meant a page whose OCR crashed produced no
-    # page-N.pdf, the merge silently carried on with whatever was left, and the
-    # run exited 0 with a PDF missing pages and no warning anywhere.
-    # Under --preserve the page PDF must carry the recognised text and nothing
-    # else: it is going to be stamped onto the untouched original, so painting
-    # the image again would hide it behind a second, worse copy of itself.
-    # The PDF renderer is switched on by its parameter, not by the `pdf` config
-    # file: that file lives in the system tessdata, and a --tessdata-dir that
-    # holds only models (a tessdata_best checkout does) has no configs/, so
-    # tesseract would skip it, write a .txt instead, and still exit 0.
-    local tess_opts=(--psm "$PSM" -c tessedit_create_pdf=1)
-    if [ -n "$TESSDATA_DIR" ]; then
-        tess_opts+=(--tessdata-dir "$TESSDATA_DIR")
-    fi
-    if [ -n "$THRESHOLD_METHOD" ]; then
-        tess_opts+=(-c "thresholding_method=$THRESHOLD_METHOD")
-    fi
-    if [ "$PRESERVE" = true ]; then
-        tess_opts+=(-c textonly_pdf=1)
-    fi
-
-    if ! tesseract "$img" "$base" -l "$LANG_CODE" "${tess_opts[@]}" >/dev/null 2>"$base.err"; then
-        # Drop anything half-written, so a truncated page cannot be counted as
-        # a successful one and merged into the output.
-        rm -f "$base.pdf"
-        echo "FAIL $name"
-        return 1
-    fi
-    # Exit 0 is not proof of a page: tesseract also exits 0 when it skipped a
-    # renderer. Reporting DONE anyway left the merge to fail with "0 page(s)"
-    # and no reason, since the .err that would explain it had been deleted.
-    if [ ! -s "$base.pdf" ]; then
-        echo "tesseract exited 0 but wrote no PDF" >> "$base.err"
-        echo "FAIL $name"
-        return 1
-    fi
-    rm -f "$base.err"
-    
-    # Signal completion similar to progress
-    echo "DONE"
-}
-export -f process_page_worker
+log_info "Step 2/3: OCR Processing ($OCR_LANG)..."
 
 # Turn the workers' DONE / FAIL lines into the progress bar. The first line of
 # any kind also ends the spinner that covers PaddleOCR's model loading.
@@ -1257,53 +1117,43 @@ track_progress() {
     done
 }
 
-# `|| true` on each pipeline: a worker that fails makes it exit non-zero, and
-# under `pipefail` that would abort the script right here — before the counting
-# check below could name the pages that failed. Let the check decide, so the
-# user gets a readable error instead of a bare exit code.
-if [ "$PADDLE" = true ]; then
-    # Cleaning stays parallel; recognition is one process, because each one
-    # would load its own copy of the models, and PaddleOCR already uses every
-    # core for a page.
-    if [ "$CLEAN" = true ]; then
-        spinner_start "Cleaning pages"
-        find "$TEMP_DIR" -name "page-*.png" -print0 | \
-            xargs -0 -P "$JOBS" -I {} bash -c 'clean_page "$@"' _ {} >/dev/null || true
-        spinner_stop
-    fi
-    shopt -s nullglob
-    CLEAN_ERRS=("$TEMP_DIR"/page-*.err)
-    shopt -u nullglob
-    if [ "${#CLEAN_ERRS[@]}" -gt 0 ]; then
-        for err in "${CLEAN_ERRS[@]}"; do
-            log_error "Cleaning failed on $(basename "$err" .err).png: $(tr '\n' ' ' < "$err" | cut -c1-200)"
-        done
-        exit 1
-    fi
-
-    PADDLE_HELPER="$TEMP_DIR/paddle_ocr.py"
-    write_paddle_helper "$PADDLE_HELPER"
-    paddle_args=(--lang "$PADDLE_LANGS" --model "$PADDLE_MODEL" --dpi "$DPI" --models-dir "$PADDLE_MODELS_DIR")
-    if [ "$PRESERVE" = true ]; then
-        paddle_args+=(--textonly)
-    fi
-    # The invisible text is set in tesseract's glyphless font when it is
-    # around; without it the font is simply not embedded.
-    if command -v tesseract >/dev/null 2>&1; then
-        TESS_DATA="$(tesseract --list-langs 2>&1 | sed -n 's/.*"\(.*\)".*/\1/p' | head -n 1)"
-        if [ -f "${TESS_DATA%/}/pdf.ttf" ]; then
-            paddle_args+=(--font "${TESS_DATA%/}/pdf.ttf")
-        fi
-    fi
-    spinner_start "Loading the OCR models"
-    "$PADDLE_PY" -W ignore "$PADDLE_HELPER" "${paddle_args[@]}" "${PAGE_IMAGES[@]}" \
-        2>"$TEMP_DIR/paddle.log" | track_progress || true
-    spinner_stop
-else
-    find "$TEMP_DIR" -name "page-*.png" -print0 | \
-        xargs -0 -P "$JOBS" -I {} bash -c 'process_page_worker "$@"' _ {} | \
-        track_progress || true
+ENGINE_HELPER="$TEMP_DIR/ocr.py"
+write_engine_helper "$ENGINE_HELPER"
+engine_args=(--lang "$ENGINE_LANGS" --dpi "$DPI" --models-dir "$ENGINE_MODELS_DIR")
+if [ "$PRESERVE" = true ]; then
+    engine_args+=(--textonly)
+# Photos (every image in the source a JPEG) go back in as JPEG. pdfimages lists
+# each image with its encoding in the ninth column, after two header lines.
+elif command -v pdfimages >/dev/null 2>&1 &&
+     pdfimages -list "$INPUT_FILE" 2>/dev/null | awk 'NR > 2 { n++; if ($9 != "jpeg" && $9 != "jpx") other = 1 }
+                                                    END { exit !(n > 0 && !other) }'; then
+    engine_args+=(--jpeg)
 fi
+spinner_start "Loading the OCR models"
+# `|| true`: a page that fails makes the helper exit non-zero, and under
+# `pipefail` that would abort the script right here — before the counting check
+# below could name the pages that failed. Let the check decide, so the user
+# gets a readable error instead of a bare exit code.
+WORKERS=$JOBS
+if [ "$WORKERS" -gt "$PAGE_COUNT" ]; then WORKERS=$PAGE_COUNT; fi
+THREADS=$(( CORES / WORKERS ))
+if [ "$THREADS" -lt 1 ]; then THREADS=1; fi
+run_workers() {
+    local k i share
+    for ((k = 0; k < WORKERS; k++)); do
+        # Every WORKERS-th page, so each worker gets an even mix of the
+        # document rather than one block of its heaviest pages.
+        share=()
+        for ((i = k; i < PAGE_COUNT; i += WORKERS)); do
+            share+=("${PAGE_IMAGES[i]}")
+        done
+        "$ENGINE_PY" -W ignore "$ENGINE_HELPER" "${engine_args[@]}" --threads "$THREADS" \
+            "${share[@]}" &
+    done
+    wait
+}
+run_workers 2>"$TEMP_DIR/engine.log" | track_progress || true
+spinner_stop
 
 # Close the progress bar's line — but only if one was actually drawn.
 if [ -t 1 ] && [ "$VERBOSE" = false ]; then
@@ -1337,9 +1187,9 @@ if [ "$PAGE_COUNT_PDF" -ne "$PAGE_COUNT" ]; then
     done
     # A PaddleOCR process that died outright (out of memory, a crash in native
     # code) leaves no per-page reason, only its own log.
-    if [ "$PADDLE" = true ] && [ "${#ERR_LIST[@]}" -eq 0 ] && [ -s "$TEMP_DIR/paddle.log" ]; then
+    if [ "${#ERR_LIST[@]}" -eq 0 ] && [ -s "$TEMP_DIR/engine.log" ]; then
         log_error "  The OCR engine stopped; last lines of its log:"
-        tail -n 5 "$TEMP_DIR/paddle.log" | while read -r l; do log_error "    $l"; done
+        tail -n 5 "$TEMP_DIR/engine.log" | while read -r l; do log_error "    $l"; done
     fi
     exit 1
 fi
@@ -1408,16 +1258,6 @@ if [ "$GEN_TEXT" = true ]; then
     log_info "Generating text file..."
     pdftotext "$OUTPUT_FILE" "$TXT_FILE"
     log_success "Text saved to: $TXT_FILE"
-fi
-
-if [ "$GEN_MD" = true ]; then
-    MD_FILE="$OUT_STEM.md"
-    log_info "Generating .md file (layout-preserved plain text)..."
-    # Not markdown: `pdftotext -layout` keeps the physical layout with spaces,
-    # it does not emit headings, lists or emphasis. The extension is a
-    # convenience for editors, and the help text now says so.
-    pdftotext -layout "$OUTPUT_FILE" "$MD_FILE"
-    log_success "Markdown saved to: $MD_FILE"
 fi
 
 echo ""

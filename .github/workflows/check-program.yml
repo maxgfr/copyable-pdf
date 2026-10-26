@@ -363,9 +363,8 @@ jobs:
           ./script.sh -o self.pdf self.pdf;            [ $? -eq 2 ] || { echo "❌ output overwrites input"; exit 1; }
           ./script.sh -o x.pdf notpdf.pdf;             [ $? -eq 2 ] || { echo "❌ input is not a PDF"; exit 1; }
           ./script.sh -l kli -o x.pdf input.pdf;         [ $? -eq 2 ] || { echo "❌ language no model reads"; exit 1; }
-          # Gone in 3.0: refused, not silently ignored.
-          for opt in --tesseract --plain "--tessdata-dir x" -c --clean --paddle --save-paddle \
-                     "--model tiny" "--paddle-model tiny" --no-save -m --markdown; do
+          # An unknown option is refused, not taken for the input file.
+          for opt in --foo -z; do
             ./script.sh $opt -o x.pdf input.pdf;         [ $? -eq 2 ] || { echo "❌ $opt accepted"; exit 1; }
           done
           set -e

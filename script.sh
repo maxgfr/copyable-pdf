@@ -825,13 +825,6 @@ while [[ $# -gt 0 ]]; do
             PRESERVE=true
             shift
             ;;
-        # Gone in 3.0. Refused rather than ignored: a command that asked for
-        # them would otherwise silently get something else.
-        --tesseract|--plain|--tessdata-dir|-c|--clean|--paddle|--save-paddle|\
-        --model|--paddle-model|--no-save|-m|--markdown)
-            log_error "$key was removed in copyable-pdf 3.0; drop it. (For the text as a file, use -t.)"
-            exit 2
-            ;;
         --install-engine)
             INSTALL_ONLY=true
             shift
@@ -852,6 +845,13 @@ while [[ $# -gt 0 ]]; do
         -V|--version)
             echo "copyable-pdf $VERSION"
             exit 0
+            ;;
+        # An unknown option is an error, not an input file name: taken as the
+        # input, `--foo doc.pdf` failed later on as "Unknown argument: doc.pdf".
+        -?*)
+            log_error "Unknown option: $key"
+            print_usage
+            exit 2
             ;;
         *)
             if [ -z "$INPUT_FILE" ]; then

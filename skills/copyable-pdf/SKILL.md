@@ -49,16 +49,13 @@ Pick the options from the document and the request:
 - Pages are turned upright automatically, upside down or sideways.
 - Without `--preserve` the PDF is rebuilt from 300 DPI renderings: photos stay
   JPEG and scans lossless, but vector content is rasterised.
-- Removed in 3.0, and refused with exit 2: `--tesseract`, `--plain`,
-  `--tessdata-dir`, `--clean`, `--model`, `--no-save`, `-m/--markdown`,
-  `--paddle`, `--save-paddle`, `--paddle-model`.
 
 ## Results
 
 - Exit 0: the output is written. Check it with
   `pdftotext out.pdf - | head -40` and show the user a short sample.
 - Exit 2: bad options or input (missing file, not a PDF, output over the
-  input, a removed option, a language no model reads), caught before any OCR.
+  input, an unknown option, a language no model reads), caught before any OCR.
   Nothing is written.
 - Exit 1: a missing dependency, or a page failed OCR. The error names the page.
   Nothing is written: the tool never returns a PDF with pages missing.

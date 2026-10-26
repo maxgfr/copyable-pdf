@@ -124,10 +124,6 @@ handing back a document that is quietly missing pages.
 | `-h, --help` | Show help message | - |
 | `-V, --version` | Print the version and exit | - |
 
-3.0 removed `--tesseract`, `--plain`, `--tessdata-dir`, `--clean`, `--model`,
-`--no-save`, `-m/--markdown` and the 1.6 `--paddle` options. They are refused
-with an error rather than ignored.
-
 ### Examples
 
 **Basic usage:**
@@ -182,22 +178,21 @@ without its 1 GB PaddlePaddle runtime, and several times faster on a CPU.
 Measured on generated pages with known text, scored by character accuracy per
 line, on an Apple Silicon laptop (10 cores):
 
-| Page | 2.0 | 3.0 |
+| Page | Accuracy | Time, output size |
 | :--- | :--- | :--- |
-| Clean 11 pt | 94.9% | **100%** |
-| Small print, 7 pt | 97.5% | **100%** |
-| Tiny print, 5.5 pt | 97.3% | **100%** |
-| Dense, two columns | 99.7% | **99.9%** |
-| French and Spanish accents | 91.9% | **99.99%** |
-| Noisy 150 DPI scan | 94.8% | **99.99%** |
-| Phone photos (2 pages) | 91.5%, 17.7 MB | **99.98%, 2.7 MB** |
-| Upside down / sideways | 93.6% / 93.7% | **100% / 100%** |
-| 24 pages | 128 s, 53 MB | **90 s, 35 MB** |
+| Clean 11 pt | 100% | 4 s |
+| Small print, 7 pt | 100% | 8 s |
+| Tiny print, 5.5 pt | 100% | 11 s |
+| Dense, two columns | 99.9% | 7 s |
+| French and Spanish accents | 99.99% | 4 s |
+| Noisy 150 DPI scan | 99.99% | 8 s |
+| Phone photos (2 pages) | 99.98% | 18 s, 2.7 MB |
+| Upside down / sideways | 100% / 100% | 7 s / 10 s |
+| 24 pages | - | 90 s, 35 MB |
 
-Most of the gain comes from one setting: the line orientation classifier
-RapidOCR picks by default turned about one upright line in ten upside down,
-which then read as junk. 3.0 uses PP-OCRv5's, the one the `paddleocr` package
-uses.
+Lines are turned upright by PP-OCRv5's orientation classifier, the one the
+`paddleocr` package uses: the lighter one RapidOCR picks by default turns about
+one upright line in ten upside down, which then reads as junk.
 
 Why not a larger model? The document AI models at the top of 2026's benchmarks
 (PaddleOCR-VL, GLM-OCR, MinerU, DeepSeek-OCR) are built for GPUs, are slow on a

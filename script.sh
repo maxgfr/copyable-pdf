@@ -384,8 +384,13 @@ def load_ocr(langs, models_dir, threads=0):
     # RapidOCR's default 2000, 5-6 pt print at 300 DPI lost whole lines, and at
     # full size noisy low-resolution scans read worse.
     # Word boxes: each word goes into the text layer where it sits on the page.
+    # Detection keeps a line when its box scores 0.3 or more, not RapidOCR's
+    # 0.5: on a phone photo of a curved page, the straight box around a bent
+    # line takes in background, scores under 0.5, and the whole line was
+    # dropped without a word. On 211 photographed pages, words recognised
+    # went from 94.95% to 95.81%; 43 pages read better, 5 slightly worse.
     params = {"Global.log_level": "error", "Global.max_side_len": 2500,
-              "Global.return_word_box": True}
+              "Global.return_word_box": True, "Det.box_thresh": 0.3}
     if models_dir:
         os.makedirs(models_dir, exist_ok=True)
         params["Global.model_root_dir"] = models_dir

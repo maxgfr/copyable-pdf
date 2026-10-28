@@ -262,11 +262,11 @@ require_command() {
 }
 
 # Language code (three letters, ISO 639-2, as copyable-pdf always took, or
-# PaddleOCR's own) -> PaddleOCR's, or nothing when no model reads it.
+# PaddleOCR's own) -> PaddleOCR's, or nothing when PP-OCRv6 does not read it.
 engine_lang_code() {
     case "$1" in
-        en|fr|es|de|it|pt|nl|pl|cs|da|sv|no|fi|ro|hu|tr|ca|hr|sk|sl|lt|lv|et|id|ms|vi|la|ga|cy|af|is|sq|eu|gl|mt|bs|az|uz|sw|tl|oc|lb) echo "$1" ;;
-        ch|chinese_cht|japan|korean|ru|uk|be|bg|mk|rs_cyrillic|rs_latin|kk|mn|ar|fa|ur|hi|mr|ne|th|el|ta|te) echo "$1" ;;
+        en|fr|es|de|it|pt|nl|pl|cs|da|sv|no|fi|ro|hu|tr|ca|hr|sk|sl|lt|lv|et|id|ms|vi|la|ga|cy|af|is|sq|eu|gl|mt|bs|az|uz|sw|tl|oc|lb|ku|mi|qu|rm) echo "$1" ;;
+        ch|chinese_cht|japan|rs_latin) echo "$1" ;;
         eng) echo en ;;        fra) echo fr ;;        spa) echo es ;;
         deu) echo de ;;        ita) echo it ;;        por) echo pt ;;
         nld) echo nl ;;        pol) echo pl ;;        ces) echo cs ;;
@@ -281,15 +281,10 @@ engine_lang_code() {
         glg) echo gl ;;        mlt) echo mt ;;        bos) echo bs ;;
         aze) echo az ;;        uzb) echo uz ;;        swa) echo sw ;;
         tgl) echo tl ;;        oci) echo oc ;;        ltz) echo lb ;;
+        kur) echo ku ;;        mri) echo mi ;;        que) echo qu ;;
+        roh) echo rm ;;
         chi_sim) echo ch ;;    chi_tra) echo chinese_cht ;;
-        jpn) echo japan ;;     kor) echo korean ;;
-        rus) echo ru ;;        ukr) echo uk ;;        bel) echo be ;;
-        bul) echo bg ;;        mkd) echo mk ;;        srp) echo rs_cyrillic ;;
-        kaz) echo kk ;;        mon) echo mn ;;
-        ara) echo ar ;;        fas) echo fa ;;        urd) echo ur ;;
-        hin) echo hi ;;        mar) echo mr ;;        nep) echo ne ;;
-        tha) echo th ;;        ell) echo el ;;        tam) echo ta ;;
-        tel) echo te ;;
+        jpn) echo japan ;;
     esac
 }
 
@@ -340,7 +335,7 @@ write_engine_helper() {
     cat > "$1" <<'ENGINE_HELPER_EOF'
 """Recognise page images with PaddleOCR's models and write one PDF per page.
 
-The models (PP-OCRv6, or PP-OCRv5 for scripts v6 does not read) run through
+The models (PP-OCRv6 small, one multilingual model) run through
 RapidOCR on ONNX Runtime: the same recognition as the PaddleOCR package, at a
 fraction of its size and several times its speed on a CPU.
 
@@ -358,27 +353,11 @@ import os
 import sys
 import zlib
 
-# One multilingual PP-OCRv6 model reads all of these.
-V6_LANGS = {
-    "ch", "chinese_cht", "en", "japan", "af", "az", "bs", "ca", "cs", "cy",
-    "da", "de", "es", "et", "eu", "fi", "fr", "ga", "gl", "hr", "hu", "id",
-    "is", "it", "ku", "la", "lb", "lt", "lv", "mi", "ms", "mt", "nl", "no",
-    "oc", "pl", "pt", "qu", "rm", "ro", "rs_latin", "sk", "sl", "sq", "sv",
-    "sw", "tl", "tr", "uz", "vi",
-}
-# Everything else has one PP-OCRv5 model per script.
-V5_SCRIPT = {
-    "ru": "eslav", "uk": "eslav", "be": "eslav",
-    "bg": "cyrillic", "mk": "cyrillic", "rs_cyrillic": "cyrillic",
-    "kk": "cyrillic", "mn": "cyrillic",
-    "ar": "arabic", "fa": "arabic", "ur": "arabic",
-    "hi": "devanagari", "mr": "devanagari", "ne": "devanagari",
-    "korean": "korean", "th": "th", "el": "el", "ta": "ta", "te": "te",
-}
 
-
-def load_ocr(langs, models_dir, threads=0):
-    from rapidocr import LangRec, ModelType, OCRVersion, RapidOCR
+def load_ocr(models_dir, threads=0):
+    # One multilingual PP-OCRv6 model reads every language copyable-pdf takes
+    # (the script refuses the others before it gets here).
+    from rapidocr import ModelType, OCRVersion, RapidOCR
 
     # Pages are shrunk to 2500 px on their long side before detection; at
     # RapidOCR's default 2000, 5-6 pt print at 300 DPI lost whole lines, and at
@@ -396,25 +375,17 @@ def load_ocr(langs, models_dir, threads=0):
         params["Global.model_root_dir"] = models_dir
     if threads > 0:
         params["EngineConfig.onnxruntime.intra_op_num_threads"] = threads
-    if all(lang in V6_LANGS for lang in langs):
-        # small: medium read no better on any test page, at three times the
-        # time; tiny made mistakes.
-        for part in ("Det", "Rec"):
-            params[f"{part}.ocr_version"] = OCRVersion.PPOCRV6
-            params[f"{part}.model_type"] = ModelType.SMALL
-    else:
-        script = next(V5_SCRIPT[lang] for lang in langs if lang in V5_SCRIPT)
-        if len({V5_SCRIPT.get(lang, "v6") for lang in langs}) > 1:
-            print(f"These languages need different models; reading '{script}'.",
-                  file=sys.stderr)
-        for part in ("Det", "Rec"):
-            params[f"{part}.ocr_version"] = OCRVersion.PPOCRV5
-            params[f"{part}.model_type"] = ModelType.MOBILE
-        params["Rec.lang_type"] = LangRec(script)
-    # The line orientation classifier RapidOCR picks by default (PP-OCRv4)
+    # small: medium read no better on any test page, at three times the time;
+    # tiny made mistakes.
+    for part in ("Det", "Rec"):
+        params[f"{part}.ocr_version"] = OCRVersion.PPOCRV6
+        params[f"{part}.model_type"] = ModelType.SMALL
+    # PP-OCRv6 has no line orientation classifier of its own; this one only
+    # turns lines upright, it reads nothing. RapidOCR's default (PP-OCRv4)
     # turns about one upright line in ten upside down, which then reads as
-    # junk ("ohs s fo d p s"). PP-OCRv5's server classifier, the one the
-    # paddleocr package uses, made no such mistake on any test page.
+    # junk ("ohs s fo d p s"). The PP-LCNet server classifier filed under
+    # PP-OCRv5, the one the paddleocr package uses with v6, made no such
+    # mistake on any test page.
     params["Cls.ocr_version"] = OCRVersion.PPOCRV5
     params["Cls.model_type"] = ModelType.SERVER
     ocr = RapidOCR(params=params)
@@ -709,7 +680,6 @@ def write_page(img_path, out_path, lines, dpi, textonly, font, jpeg=False):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--lang", required=True, help="PaddleOCR codes, comma separated")
     ap.add_argument("--models-dir", default="")
     ap.add_argument("--threads", type=int, default=0,
                     help="CPU threads for ONNX Runtime (0: all of them)")
@@ -738,7 +708,7 @@ def main():
 
     try:
         with contextlib.redirect_stdout(sys.stderr):
-            ocr = load_ocr(args.lang.split(","), args.models_dir, args.threads)
+            ocr = load_ocr(args.models_dir, args.threads)
     except Exception as exc:  # no network, bad model name, broken install...
         for img in args.images:
             fail(img, f"The OCR models could not load: {type(exc).__name__}: {exc}")
@@ -887,7 +857,7 @@ if [ "$INSTALL_ONLY" = true ]; then
     setup_engine
     write_engine_helper "$TEMP_DIR/ocr.py"
     spinner_start "Downloading the OCR models"
-    if ! "$ENGINE_PY" -W ignore "$TEMP_DIR/ocr.py" --warmup --lang en \
+    if ! "$ENGINE_PY" -W ignore "$TEMP_DIR/ocr.py" --warmup \
             --models-dir "$ENGINE_MODELS_DIR" \
             >/dev/null 2>"$TEMP_DIR/warmup.log"; then
         spinner_stop
@@ -1133,7 +1103,7 @@ track_progress() {
 
 ENGINE_HELPER="$TEMP_DIR/ocr.py"
 write_engine_helper "$ENGINE_HELPER"
-engine_args=(--lang "$ENGINE_LANGS" --dpi "$DPI" --models-dir "$ENGINE_MODELS_DIR")
+engine_args=(--dpi "$DPI" --models-dir "$ENGINE_MODELS_DIR")
 if [ "$PRESERVE" = true ]; then
     engine_args+=(--textonly)
 # Photos (every image in the source a JPEG) go back in as JPEG. pdfimages lists

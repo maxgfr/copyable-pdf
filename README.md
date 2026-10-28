@@ -157,8 +157,7 @@ copyable-pdf -o searchable_doc.pdf scan.pdf
 
 ## OCR engine
 
-The text is recognised by PaddleOCR's PP-OCRv6 models (PP-OCRv5 for Cyrillic,
-Arabic, Korean and other scripts v6 does not read), run by
+The text is recognised by PaddleOCR's PP-OCRv6 small model, and only that, run by
 [RapidOCR](https://github.com/RapidAI/RapidOCR) on ONNX Runtime. They come from
 the same project as the `paddleocr` Python package and recognise the same, but
 without its 1 GB PaddlePaddle runtime, and several times faster on a CPU.
@@ -175,9 +174,10 @@ without its 1 GB PaddlePaddle runtime, and several times faster on a CPU.
     are checked against their SHA-256 when downloaded.
 -   **One model size**: `small`. On the benchmark below, `medium` read no
     better at three times the time, and `tiny` made mistakes.
--   **Languages**: Latin-script languages, English, Chinese and Japanese share
-    one model, so `-l fra+eng` works. Other scripts take one language at a
-    time.
+-   **Languages**: the 50 PP-OCRv6 reads (English and the other Latin-script
+    languages, Chinese, Japanese) share one model, so `-l fra+eng` works.
+    Other scripts (Cyrillic, Arabic, Devanagari, Korean, Thai, Greek…) are
+    refused before any OCR.
 -   **Private**: models are downloaded once; pages and text never leave your
     machine.
 
@@ -196,9 +196,11 @@ line, on an Apple Silicon laptop (10 cores):
 | Upside down / sideways | 100% / 100% | 7 s / 10 s |
 | 24 pages | - | 90 s, 35 MB |
 
-Lines are turned upright by PP-OCRv5's orientation classifier, the one the
-`paddleocr` package uses: the lighter one RapidOCR picks by default turns about
-one upright line in ten upside down, which then reads as junk.
+PP-OCRv6 has no line orientation classifier of its own, so lines are turned
+upright by the PP-LCNet one the `paddleocr` package uses with it (filed under
+PP-OCRv5); it reads nothing, it only turns lines. The lighter one RapidOCR
+picks by default turns about one upright line in ten upside down, which then
+reads as junk.
 
 Why not a larger model? The document AI models at the top of 2026's benchmarks
 (PaddleOCR-VL, GLM-OCR, MinerU, DeepSeek-OCR) are built for GPUs, are slow on a
